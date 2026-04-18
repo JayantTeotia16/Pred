@@ -132,7 +132,7 @@ class ConversationDataset(Dataset):
         hf_split  = split_map[split]
 
         if dc.hf_dataset_name is not None:
-            ds = hf_load_dataset(dc.hf_dataset_name, dc.hf_config_name, split=hf_split)
+            ds = hf_load_dataset(dc.hf_dataset_name, dc.hf_config_name, split=hf_split, trust_remote_code=True)
             rows = [dict(row) for row in ds]
         else:
             import pandas as pd
