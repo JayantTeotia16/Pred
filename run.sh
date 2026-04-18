@@ -79,7 +79,7 @@ header() {
 MODE="${1:-sanity}"
 shift || true
 
-LLAMA_MODEL="meta-llama/Llama-3.2-1B"
+LLAMA_MODEL="meta-llama/Llama-3.1-8B"
 HF_DATASET="eusip/silicone"
 HF_CONFIG="meld_e"
 LOCAL_DATA=""
@@ -95,6 +95,7 @@ BATCH_SIZE=4
 EPOCHS=25
 DEVICE="cuda"
 NO_SCENE=""
+NO_LORA=""
 OUTPUT_DIR="./checkpoints"
 ANALYSIS_DIR="./analysis_outputs"
 
@@ -117,6 +118,7 @@ while [[ $# -gt 0 ]]; do
     --epochs)          EPOCHS="$2";          shift 2 ;;
     --device)          DEVICE="$2";          shift 2 ;;
     --no_scene)        NO_SCENE="--no_scene"; shift ;;
+    --no_lora)         NO_LORA="--no_lora";  shift ;;
     --output_dir)      OUTPUT_DIR="$2";      shift 2 ;;
     --analysis_dir)    ANALYSIS_DIR="$2";    shift 2 ;;
     *) err "Unknown option: $1" ;;
@@ -164,6 +166,7 @@ build_py_args() {
   args+=" --analysis_dir $ANALYSIS_DIR"
   [[ -n "$SPEAKER_COL" ]]  && args+=" --speaker_col $SPEAKER_COL"
   [[ -n "$NO_SCENE" ]]     && args+=" $NO_SCENE"
+  [[ -n "$NO_LORA" ]]      && args+=" $NO_LORA"
   [[ -n "$CHECKPOINT" ]]   && args+=" --checkpoint $CHECKPOINT"
   if [[ -n "$LOCAL_DATA" ]]; then
     args+=" --local_data $LOCAL_DATA"
@@ -178,6 +181,7 @@ install_deps() {
   header "Installing dependencies"
   $PYTHON -m pip install --quiet --upgrade pip
   $PYTHON -m pip install --quiet -r requirements.txt
+  $PYTHON -m pip install --quiet peft
   ok "Dependencies installed."
 }
 

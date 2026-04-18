@@ -257,6 +257,7 @@ class PersonalDynamicsField(nn.Module):
         super().__init__()
         self.state_dim = cfg.dispositional_state_dim
         self.dt        = cfg.ode_dt
+        self.ode_steps = cfg.ode_steps
         self.ode_func  = ODEFunc(cfg)
 
     def initial_state(self, B: int, device: torch.device) -> torch.Tensor:
@@ -277,9 +278,12 @@ class PersonalDynamicsField(nn.Module):
         Returns (s_next, ds_at_current).
         """
         self.ode_func.set_context(speaker_context, perturbation)
-        s_next = rk4_step(self.ode_func, s, self.dt)
-        t      = torch.zeros(1, device=s.device)
-        ds     = self.ode_func(t, s)
+        dt_sub = self.dt / self.ode_steps
+        s_next = s
+        for _ in range(self.ode_steps):
+            s_next = rk4_step(self.ode_func, s_next, dt_sub)
+        t  = torch.zeros(1, device=s.device)
+        ds = self.ode_func(t, s)
         return s_next, ds
 
 

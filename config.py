@@ -17,11 +17,16 @@ from typing import List, Optional
 
 @dataclass
 class ModelConfig:
-    # LLaMA — past-utterance encoder (always frozen)
-    llama_model_name: str  = "meta-llama/Llama-3.2-1B"
-    llama_hidden_size: int = 2048
+    # LLaMA — past-utterance encoder
+    llama_model_name: str  = "meta-llama/Llama-3.1-8B"
+    llama_hidden_size: int = 4096
     llama_max_length: int  = 128
-    freeze_llama: bool     = True
+
+    # LoRA fine-tuning on LLaMA (replaces full freeze)
+    use_lora: bool      = True
+    lora_rank: int      = 8
+    lora_alpha: int     = 16
+    lora_dropout: float = 0.05
 
     # Dispositional state dim
     dispositional_state_dim: int = 64
@@ -49,8 +54,9 @@ class ModelConfig:
         "neutral", "surprise", "fear", "sadness", "disgust", "joy", "anger"
     ])
 
-    # ODE step size (one step per past utterance)
-    ode_dt: float = 1.0
+    # ODE integration: step size and sub-steps per turn
+    ode_dt: float  = 1.0
+    ode_steps: int = 4   # RK4 sub-steps per turn (fixes mid-history dip)
 
 
 @dataclass
@@ -102,9 +108,11 @@ class TrainingConfig:
     warmup_steps: int    = 100
     grad_clip: float     = 1.0
 
-    prediction_loss_weight: float = 1.0
-    surprise_reg_weight: float    = 0.01
-    min_history_turns: int        = 1    # turns with no history excluded from loss
+    prediction_loss_weight: float  = 1.0
+    surprise_reg_weight: float     = 0.5    # raised from 0.01 — was effectively ignored
+    contrastive_loss_weight: float = 0.1    # speaker contrastive loss
+    contrastive_temperature: float = 0.1
+    min_history_turns: int         = 1    # turns with no history excluded from loss
 
     max_conversation_length: int  = 30
 

@@ -37,14 +37,15 @@ from dispositional_module import (
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Frozen LLaMA encoder
+# LLaMA encoder (frozen or LoRA-adapted)
 # ──────────────────────────────────────────────────────────────────────────────
 
-class FrozenLLaMAEncoder(nn.Module):
+class LLaMAEncoder(nn.Module):
     """
-    LLaMA used purely to produce rich contextual representations of
-    PAST utterances. No classification head — just a feature extractor.
-    Always frozen: no gradients flow into LLaMA weights.
+    LLaMA feature extractor for past utterances.
+    With use_lora=True (default): lightweight LoRA adapters on q/v projections
+    allow the encoder to adapt to the emotion domain while keeping memory low.
+    With use_lora=False: fully frozen, no gradients through LLaMA.
     """
 
     def __init__(self, cfg: ModelConfig):
@@ -55,15 +56,38 @@ class FrozenLLaMAEncoder(nn.Module):
             output_hidden_states=True,
             torch_dtype=torch.float16,
         )
-        for p in self.llama.parameters():
-            p.requires_grad = False
-        print("  LLaMA frozen.")
+        self.use_lora = cfg.use_lora
 
-    @torch.no_grad()
+        if cfg.use_lora:
+            from peft import LoraConfig, get_peft_model
+            lora_cfg = LoraConfig(
+                r=cfg.lora_rank,
+                lora_alpha=cfg.lora_alpha,
+                lora_dropout=cfg.lora_dropout,
+                target_modules=["q_proj", "v_proj"],
+                bias="none",
+            )
+            self.llama = get_peft_model(self.llama, lora_cfg)
+            trainable = sum(p.numel() for p in self.llama.parameters() if p.requires_grad)
+            total     = sum(p.numel() for p in self.llama.parameters())
+            print(f"  LoRA applied — trainable: {trainable:,} / {total:,} params")
+        else:
+            for p in self.llama.parameters():
+                p.requires_grad = False
+            print("  LLaMA frozen.")
+
     def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """Returns last-layer hidden states (B, L, H) in fp32."""
-        out = self.llama(input_ids=input_ids, attention_mask=attention_mask)
+        if self.use_lora:
+            out = self.llama(input_ids=input_ids, attention_mask=attention_mask)
+        else:
+            with torch.no_grad():
+                out = self.llama(input_ids=input_ids, attention_mask=attention_mask)
         return out.hidden_states[-1].float()
+
+
+# keep old name as alias so existing checkpoints load without errors
+FrozenLLaMAEncoder = LLaMAEncoder
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -91,7 +115,7 @@ class DispositionalPredictionModel(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        self.llama_encoder      = FrozenLLaMAEncoder(cfg)
+        self.llama_encoder      = LLaMAEncoder(cfg)
         self.perturbation_enc   = PerturbationEncoder(cfg.llama_hidden_size, cfg.perturbation_dim)
         self.speaker_context    = DynamicSpeakerContext(cfg)
         self.personal_dynamics  = PersonalDynamicsField(cfg)
@@ -149,10 +173,11 @@ class DispositionalPredictionModel(nn.Module):
         prev_delta_u = torch.zeros(B, self.cfg.perturbation_dim, device=device)
 
         # ── Storage ───────────────────────────────────────────────────────
-        all_logits   = []
-        all_states   = []
-        all_surprise = []
-        prev_logits  = None
+        all_logits    = []
+        all_states    = []
+        all_surprise  = []
+        all_spk_ctx   = []   # speaker context used at each turn (for contrastive loss)
+        prev_logits   = None
 
         # ── Autoregressive turn loop ──────────────────────────────────────
         for t in range(T):
@@ -161,6 +186,7 @@ class DispositionalPredictionModel(nn.Module):
 
             # ── 1. Get current speaker context (built from THEIR past turns)
             c_t = self.speaker_context.get_context(spk_ctx, spk_t)  # (B, cd)
+            all_spk_ctx.append(c_t)
 
             # ── 2. Step ODE: s(t-1) → s(t)
             #       Uses prev_delta_u (from turn t-1) and c_t (speaker context
@@ -217,6 +243,8 @@ class DispositionalPredictionModel(nn.Module):
             "prediction_logits":    torch.stack(all_logits,   dim=1),  # (B, T, E)
             "dispositional_states": torch.stack(all_states,   dim=1),  # (B, T, D)
             "surprise":             torch.stack(all_surprise, dim=1),  # (B, T)
+            "speaker_contexts":     torch.stack(all_spk_ctx,  dim=1),  # (B, T, cd)
+            "speaker_ids":          speaker_ids,
             "emotion_ids":          emotion_ids,
             "lengths":              lengths,
         }

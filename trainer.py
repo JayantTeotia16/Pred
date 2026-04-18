@@ -28,10 +28,54 @@ from model import DispositionalPredictionModel
 # Loss
 # ──────────────────────────────────────────────────────────────────────────────
 
+def contrastive_speaker_loss(
+    speaker_contexts: torch.Tensor,  # (B, T, D)
+    speaker_ids: torch.Tensor,       # (B, T)
+    valid_mask: torch.Tensor,        # (B, T) bool
+    temperature: float = 0.1,
+) -> torch.Tensor:
+    """
+    Supervised contrastive loss on speaker context vectors.
+    Pulls together turns from the same speaker; pushes apart different speakers.
+    Operates within each conversation (no cross-conversation negatives).
+    """
+    B, T, D = speaker_contexts.shape
+    device  = speaker_contexts.device
+    loss    = torch.tensor(0.0, device=device)
+    count   = 0
+
+    for b in range(B):
+        mask = valid_mask[b]              # (T,)
+        vecs = speaker_contexts[b][mask]  # (N, D)
+        spks = speaker_ids[b][mask]       # (N,)
+        N    = vecs.shape[0]
+        if N < 2:
+            continue
+
+        vecs = F.normalize(vecs.float(), dim=-1)
+        sim  = vecs @ vecs.T / temperature                         # (N, N)
+        eye  = torch.eye(N, dtype=torch.bool, device=device)
+        pos  = (spks.unsqueeze(0) == spks.unsqueeze(1)) & ~eye    # same speaker
+
+        if not pos.any():
+            continue
+
+        # log-softmax denominator over all non-self pairs
+        sim_masked = sim.masked_fill(eye, float("-inf"))
+        log_denom  = torch.logsumexp(sim_masked, dim=-1, keepdim=True)  # (N, 1)
+        log_prob   = sim - log_denom                                      # (N, N)
+
+        loss  += -(log_prob * pos.float()).sum() / pos.float().sum()
+        count += 1
+
+    return loss / max(count, 1)
+
+
 class PredictionLoss(nn.Module):
     """
     L = w_pred · CE(prediction_logits, labels)
       + w_surp · surprise_calibration_reg
+      + w_cont · contrastive_speaker_loss
 
     Supervision starts at min_history_turns to skip cold-start turns
     where the model has no history to work with.
@@ -41,6 +85,8 @@ class PredictionLoss(nn.Module):
         super().__init__()
         self.w_pred   = cfg.prediction_loss_weight
         self.w_surp   = cfg.surprise_reg_weight
+        self.w_cont   = cfg.contrastive_loss_weight
+        self.cont_tmp = cfg.contrastive_temperature
         self.min_hist = cfg.min_history_turns
         self.ce       = nn.CrossEntropyLoss(ignore_index=-1, reduction="none")
 
@@ -48,6 +94,8 @@ class PredictionLoss(nn.Module):
         logits   = outputs["prediction_logits"]    # (B, T, E)
         labels   = outputs["emotion_ids"]          # (B, T)
         surprise = outputs["surprise"]             # (B, T)
+        spk_ctx  = outputs["speaker_contexts"]     # (B, T, D)
+        spk_ids  = outputs.get("speaker_ids")      # (B, T) — may be absent in sanity
         B, T, E  = logits.shape
 
         pred_loss = self.ce(logits.view(B*T, E), labels.view(B*T)).view(B, T)
@@ -62,15 +110,25 @@ class PredictionLoss(nn.Module):
         # Surprise calibration: penalise high surprise on predictable turns
         surp_reg = surprise * (1.0 - torch.exp(-pred_loss.detach()))
 
-        n       = valid.sum().clamp(min=1)
-        L_pred  = (pred_loss * valid).sum() / n
-        L_surp  = (surp_reg  * valid).sum() / n
-        total   = self.w_pred * L_pred + self.w_surp * L_surp
+        n      = valid.sum().clamp(min=1)
+        L_pred = (pred_loss * valid).sum() / n
+        L_surp = (surp_reg  * valid).sum() / n
+
+        # Contrastive speaker loss (skip if no speaker ids available)
+        if spk_ids is not None and self.w_cont > 0:
+            L_cont = contrastive_speaker_loss(
+                spk_ctx, spk_ids, valid.bool(), self.cont_tmp
+            )
+        else:
+            L_cont = torch.tensor(0.0, device=logits.device)
+
+        total = self.w_pred * L_pred + self.w_surp * L_surp + self.w_cont * L_cont
 
         return total, {
-            "loss_total":      total.item(),
-            "loss_prediction": L_pred.item(),
-            "loss_surprise":   L_surp.item(),
+            "loss_total":       total.item(),
+            "loss_prediction":  L_pred.item(),
+            "loss_surprise":    L_surp.item(),
+            "loss_contrastive": L_cont.item(),
         }
 
 
