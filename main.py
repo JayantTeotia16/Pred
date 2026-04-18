@@ -64,6 +64,7 @@ def sanity_check(cfg: ExperimentConfig):
             return torch.randn(ids.shape[0], ids.shape[1], self.H)
 
     model = DispositionalPredictionModel.__new__(DispositionalPredictionModel)
+    nn.Module.__init__(model)
     model.cfg = cfg.model
     model.llama_encoder    = MockLLaMA(cfg.model.llama_hidden_size)
     model.perturbation_enc = PerturbationEncoder(cfg.model.llama_hidden_size, cfg.model.perturbation_dim)
@@ -73,16 +74,6 @@ def sanity_check(cfg: ExperimentConfig):
     model.prediction_head  = PredictionHead(
         cfg.model.dispositional_state_dim, cfg.model.num_emotions, cfg.model.scene_state_dim
     )
-    nn.Module.__init__(model)
-    for name, mod in [
-        ("llama_encoder",     model.llama_encoder),
-        ("perturbation_enc",  model.perturbation_enc),
-        ("speaker_context",   model.speaker_context),
-        ("personal_dynamics", model.personal_dynamics),
-        ("scene_dynamics",    model.scene_dynamics),
-        ("prediction_head",   model.prediction_head),
-    ]:
-        model.add_module(name, mod)
 
     B, T, L, E = 2, 6, 10, 7
     emotion_ids = torch.randint(0, E, (B, T))
