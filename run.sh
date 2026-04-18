@@ -181,7 +181,7 @@ install_deps() {
   header "Installing dependencies"
   $PYTHON -m pip install --quiet --upgrade pip
   $PYTHON -m pip install --quiet -r requirements.txt
-  $PYTHON -m pip install --quiet peft
+  $PYTHON -m pip install --quiet peft tqdm
   ok "Dependencies installed."
 }
 

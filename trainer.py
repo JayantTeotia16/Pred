@@ -19,6 +19,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score, classification_report
+from tqdm import tqdm
 
 from config import TrainingConfig
 from model import DispositionalPredictionModel
@@ -207,12 +208,15 @@ class Trainer:
 
     # ── Training epoch ─────────────────────────────────────────────────────
 
-    def train_epoch(self) -> Dict:
+    def train_epoch(self, epoch: int) -> Dict:
         self.model.train()
         all_preds, all_labels = [], []
         epoch_losses = []
 
-        for batch in self.train_loader:
+        bar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.cfg.num_epochs} [train]",
+                   unit="batch", dynamic_ncols=True, leave=False)
+
+        for batch in bar:
             batch   = self._to_device(batch)
             outputs = self.model(batch)
             loss, loss_dict = self.loss_fn(outputs)
@@ -228,12 +232,15 @@ class Trainer:
             all_preds.extend(p); all_labels.extend(l)
             self.global_step += 1
 
-            if self.global_step % self.cfg.log_every == 0:
-                avg = {k: np.mean([d[k] for d in epoch_losses[-self.cfg.log_every:]])
-                       for k in loss_dict}
-                print(f"  step {self.global_step} | " +
-                      " | ".join(f"{k}={v:.4f}" for k, v in avg.items()))
+            bar.set_postfix(
+                loss=f"{loss_dict['loss_total']:.4f}",
+                pred=f"{loss_dict['loss_prediction']:.4f}",
+                surp=f"{loss_dict['loss_surprise']:.4f}",
+                cont=f"{loss_dict['loss_contrastive']:.4f}",
+                lr=f"{self.scheduler.get_last_lr()[0]:.2e}",
+            )
 
+        bar.close()
         wf1 = f1_score(np.array(all_labels), np.array(all_preds),
                        average="weighted", zero_division=0)
         return {"train_wf1": wf1,
@@ -247,7 +254,10 @@ class Trainer:
         all_preds, all_labels, all_turns = [], [], []
         all_surprise = []
 
-        for batch in loader:
+        bar = tqdm(loader, desc=f"[{split.upper()}]", unit="batch",
+                   dynamic_ncols=True, leave=False)
+
+        for batch in bar:
             batch   = self._to_device(batch)
             outputs = self.model(batch)
 
@@ -257,6 +267,8 @@ class Trainer:
             mask = (outputs["emotion_ids"] >= 0)
             mask[:, :self.cfg.min_history_turns] = False
             all_surprise.extend(outputs["surprise"][mask].cpu().numpy())
+
+        bar.close()
 
         all_preds  = np.array(all_preds)
         all_labels = np.array(all_labels)
@@ -301,12 +313,20 @@ class Trainer:
 
     def run(self):
         print("\n=== Training Start ===")
-        for epoch in range(1, self.cfg.num_epochs + 1):
-            print(f"\nEpoch {epoch}/{self.cfg.num_epochs}")
-            train_m = self.train_epoch()
+        epoch_bar = tqdm(range(1, self.cfg.num_epochs + 1), desc="Overall progress",
+                         unit="epoch", dynamic_ncols=True)
+
+        for epoch in epoch_bar:
+            train_m = self.train_epoch(epoch)
             val_m   = self.evaluate(self.val_loader, "val")
 
             wf1 = val_m["val_wf1"]
+            epoch_bar.set_postfix(
+                val_f1=f"{wf1:.4f}",
+                best=f"{self.best_val_f1:.4f}",
+                train_f1=f"{train_m['train_wf1']:.4f}",
+            )
+
             if wf1 > self.best_val_f1:
                 self.best_val_f1 = wf1
                 path = os.path.join(self.cfg.save_dir, "best_model.pt")
@@ -317,12 +337,13 @@ class Trainer:
                     "metrics":     {k: v for k, v in val_m.items() if k != "report"},
                     "model_cfg":   self.model.cfg,
                 }, path)
-                print(f"  *** New best val F1: {wf1:.4f} → saved ***")
+                tqdm.write(f"  *** Epoch {epoch}: new best val F1 {wf1:.4f} → saved ***")
 
             self.history.append({**train_m,
                                   **{k: v for k, v in val_m.items() if k != "report"},
                                   "epoch": epoch})
 
+        epoch_bar.close()
         print(f"\n=== Done. Best Val F1: {self.best_val_f1:.4f} ===")
         with open(os.path.join(self.cfg.save_dir, "history.json"), "w") as f:
             json.dump(self.history, f, indent=2)
