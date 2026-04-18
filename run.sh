@@ -212,7 +212,7 @@ check_dataset() {
     $PYTHON -c "
 from datasets import load_dataset
 try:
-    ds = load_dataset('$HF_DATASET', '$HF_CONFIG', split='$TRAIN_SPLIT')
+    ds = load_dataset('$HF_DATASET', '$HF_CONFIG', split='$TRAIN_SPLIT', trust_remote_code=True)
     print(f'  Train split: {len(ds)} examples')
     print(f'  Columns: {list(ds.features.keys())}')
 except Exception as e:
