@@ -68,9 +68,13 @@ class LLaMAEncoder(nn.Module):
                 bias="none",
             )
             self.llama = get_peft_model(self.llama, lora_cfg)
+            # Required for gradient checkpointing to work with PEFT
+            self.llama.enable_input_require_grads()
+            self.llama.gradient_checkpointing_enable()
             trainable = sum(p.numel() for p in self.llama.parameters() if p.requires_grad)
             total     = sum(p.numel() for p in self.llama.parameters())
             print(f"  LoRA applied — trainable: {trainable:,} / {total:,} params")
+            print(f"  Gradient checkpointing enabled.")
         else:
             for p in self.llama.parameters():
                 p.requires_grad = False
@@ -154,6 +158,18 @@ class DispositionalPredictionModel(nn.Module):
         emotion_ids    = batch["emotion_ids"]      # (B, T)
         lengths        = batch["length"]           # (B,)
 
+        # ── Pre-encode all utterances in ONE batched LLaMA call ──────────
+        # Calling LLaMA T times inside the loop would keep T separate
+        # computation graphs alive simultaneously until loss.backward(),
+        # causing OOM on 8B models. One batched call (B*T, L) produces a
+        # single graph that is freed as soon as backward() runs.
+        flat_ids    = input_ids.view(B * T, L)           # (B*T, L)
+        flat_mask   = attention_mask.view(B * T, L)      # (B*T, L)
+        flat_hidden = self.llama_encoder.encode(flat_ids, flat_mask)       # (B*T, L, H)
+        flat_delta  = self.perturbation_enc(flat_hidden, flat_mask)        # (B*T, pd)
+        all_delta_u = flat_delta.view(B, T, self.cfg.perturbation_dim)    # (B, T, pd)
+        del flat_ids, flat_mask, flat_hidden, flat_delta   # free intermediates early
+
         # ── Initialise states ─────────────────────────────────────────────
 
         # Dispositional state — zero for everyone (no prior knowledge)
@@ -204,39 +220,43 @@ class DispositionalPredictionModel(nn.Module):
             all_logits.append(logits_t)
             all_states.append(s)
 
-            # ── 4. Surprise: consecutive prediction divergence ─────────────
+            # ── 4. Surprise: KL divergence between consecutive predictions ──
+            #       Gradients flow so w_surp actually trains the model.
             if prev_logits is not None:
-                with torch.no_grad():
-                    p_prev = F.softmax(prev_logits, dim=-1)
-                    p_curr = F.softmax(logits_t.detach(), dim=-1)
-                    surprise_t = F.kl_div(
-                        p_prev.log().clamp(min=-10), p_curr, reduction="none"
-                    ).sum(-1)                             # (B,)
+                p_prev = F.softmax(prev_logits, dim=-1)
+                p_curr = F.softmax(logits_t, dim=-1)
+                surprise_t = F.kl_div(
+                    p_prev.log().clamp(min=-10), p_curr, reduction="none"
+                ).sum(-1)                                 # (B,)
             else:
                 surprise_t = torch.zeros(B, device=device)
             all_surprise.append(surprise_t * valid_t)
             prev_logits = logits_t
 
-            # ── 5. NOW consume utterance t to build state for future turns ─
-            #       (runs AFTER prediction is stored — no target leakage)
+            # ── 5. Consume precomputed δu for turn t to update states ─────
+            #       Runs AFTER prediction is stored — no leakage.
+            #       Gate on valid_t: padding turns must not corrupt states.
             if t < T - 1:
-                ids_t = input_ids[:, t, :]
-                msk_t = attention_mask[:, t, :]
-
-                # Encode past utterance
-                hidden   = self.llama_encoder.encode(ids_t, msk_t)        # (B, L, H)
-                delta_u  = self.perturbation_enc(hidden, msk_t)           # (B, pd)
+                delta_u = all_delta_u[:, t, :]   # (B, pd) — precomputed above
 
                 # Scene dynamics: update scene, get its influence on δu
                 if self.scene_dynamics is not None:
-                    scene_s, scene_infl = self.scene_dynamics.step(scene_s, s)
+                    scene_s_new, scene_infl = self.scene_dynamics.step(scene_s, s)
+                    scene_s = torch.where(
+                        valid_t.bool().unsqueeze(-1), scene_s_new, scene_s
+                    )
                     delta_u = delta_u + scene_infl
 
-                # Update this speaker's context with what they just said
-                spk_ctx = self.speaker_context.update(spk_ctx, spk_t, delta_u)
+                # Update this speaker's context — only for non-padding turns
+                spk_ctx_new = self.speaker_context.update(spk_ctx, spk_t, delta_u)
+                spk_ctx = torch.where(
+                    valid_t.bool().unsqueeze(-1).unsqueeze(-1), spk_ctx_new, spk_ctx
+                )
 
-                # Store δu for next ODE step
-                prev_delta_u = delta_u
+                # Store δu for next ODE step — only for non-padding turns
+                prev_delta_u = torch.where(
+                    valid_t.bool().unsqueeze(-1), delta_u, prev_delta_u
+                )
 
         # ── Stack and return ──────────────────────────────────────────────
         return {

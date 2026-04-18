@@ -273,9 +273,15 @@ class Trainer:
                     all_labels[m], all_preds[m], average="weighted", zero_division=0
                 ))
 
+        unique_labels = sorted(set(all_labels))
+        target_names  = [
+            self.emotion_labels[i] for i in unique_labels
+            if i < len(self.emotion_labels)
+        ]
         report = classification_report(
             all_labels, all_preds,
-            target_names=self.emotion_labels[:len(set(all_labels))],
+            labels=unique_labels,
+            target_names=target_names,
             zero_division=0,
         )
 

@@ -96,10 +96,11 @@ class ConversationDataset(Dataset):
 
     def __init__(
         self,
-        split: str,                    # "train" | "val" | "test"
+        split: str,                            # "train" | "val" | "test"
         model_cfg: ModelConfig,
         data_cfg: DataConfig,
         train_cfg: TrainingConfig,
+        emotion2id: Optional[Dict[str, int]] = None,  # pass train's mapping to val/test
     ):
         self.model_cfg  = model_cfg
         self.data_cfg   = data_cfg
@@ -112,14 +113,18 @@ class ConversationDataset(Dataset):
         # Load raw data
         raw = self._load_split(split)
 
-        # Build conversations and emotion vocab
-        self.conversations, self.emotion2id = self._build_conversations(raw, data_cfg)
+        # Build conversations, reusing the provided emotion2id if given (val/test
+        # must use the same label mapping as train to keep IDs consistent).
+        self.conversations, self.emotion2id = self._build_conversations(
+            raw, data_cfg, emotion2id=emotion2id
+        )
 
-        # Update model config with actual emotion count
-        model_cfg.num_emotions  = len(self.emotion2id)
-        model_cfg.emotion_labels = [
-            k for k, _ in sorted(self.emotion2id.items(), key=lambda x: x[1])
-        ]
+        # Only update model config from the train split (caller passes None for train)
+        if emotion2id is None:
+            model_cfg.num_emotions   = len(self.emotion2id)
+            model_cfg.emotion_labels = [
+                k for k, _ in sorted(self.emotion2id.items(), key=lambda x: x[1])
+            ]
 
     # ── Loading ───────────────────────────────────────────────────────────
 
@@ -150,29 +155,29 @@ class ConversationDataset(Dataset):
         self,
         rows: List[Dict],
         dc: DataConfig,
+        emotion2id: Optional[Dict[str, int]] = None,
     ) -> Tuple[List[Conversation], Dict[str, int]]:
         """
         Groups rows by dialogue_id, sorts turns, builds Conversation objects.
-        Derives a canonical emotion2id mapping from DataConfig.
+        Derives a canonical emotion2id mapping from DataConfig, or reuses the
+        provided one (so val/test use the exact same label IDs as train).
         """
         # ── Emotion mapping ───────────────────────────────────────────────
         if dc.emotion_int_to_name is not None:
-            # Use the provided mapping
             int_to_name = {i: name for i, name in enumerate(dc.emotion_int_to_name)}
         else:
-            # Auto-detect: collect all unique emotion values from data
             unique = sorted(set(str(r[dc.emotion_col]) for r in rows))
             int_to_name = {i: v for i, v in enumerate(unique)}
 
-        # Build canonical emotion2id: name → internal ID
-        # We align to CANONICAL_EMOTIONS where possible, append unknowns
-        emotion2id: Dict[str, int] = {}
-        for name in CANONICAL_EMOTIONS:
-            if name in int_to_name.values():
-                emotion2id[name] = len(emotion2id)
-        for name in int_to_name.values():
-            if name not in emotion2id:
-                emotion2id[name] = len(emotion2id)
+        if emotion2id is None:
+            # Build canonical mapping (train split only)
+            emotion2id = {}
+            for name in CANONICAL_EMOTIONS:
+                if name in int_to_name.values():
+                    emotion2id[name] = len(emotion2id)
+            for name in int_to_name.values():
+                if name not in emotion2id:
+                    emotion2id[name] = len(emotion2id)
 
         # ── Group by dialogue ─────────────────────────────────────────────
         dialogue_rows: Dict[str, List] = defaultdict(list)
@@ -301,10 +306,12 @@ def build_dataloaders(
     train_ds = ConversationDataset("train", model_cfg, data_cfg, train_cfg)
 
     print("Loading val split...")
-    val_ds   = ConversationDataset("val",   model_cfg, data_cfg, train_cfg)
+    val_ds   = ConversationDataset("val",  model_cfg, data_cfg, train_cfg,
+                                   emotion2id=train_ds.emotion2id)
 
     print("Loading test split...")
-    test_ds  = ConversationDataset("test",  model_cfg, data_cfg, train_cfg)
+    test_ds  = ConversationDataset("test", model_cfg, data_cfg, train_cfg,
+                                   emotion2id=train_ds.emotion2id)
 
     def make_loader(ds, shuffle):
         return DataLoader(
