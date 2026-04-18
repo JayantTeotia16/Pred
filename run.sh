@@ -248,8 +248,7 @@ run_train() {
 
 run_eval() {
   header "Evaluation"
-  [[ -z "$CHECKPOINT" ]] && err "--checkpoint required for eval."
-  [[ ! -f "$CHECKPOINT" ]] && err "Checkpoint not found: $CHECKPOINT"
+  [[ -n "$CHECKPOINT" && ! -f "$CHECKPOINT" ]] && err "Checkpoint not found: $CHECKPOINT"
   PY_ARGS="$(build_py_args)"
   $PYTHON main.py --mode eval $PY_ARGS
   ok "Evaluation complete."
@@ -257,8 +256,7 @@ run_eval() {
 
 run_analyse() {
   header "Analysis"
-  [[ -z "$CHECKPOINT" ]] && err "--checkpoint required for analyse."
-  [[ ! -f "$CHECKPOINT" ]] && err "Checkpoint not found: $CHECKPOINT"
+  [[ -n "$CHECKPOINT" && ! -f "$CHECKPOINT" ]] && err "Checkpoint not found: $CHECKPOINT"
   mkdir -p "$ANALYSIS_DIR"
   PY_ARGS="$(build_py_args)"
   $PYTHON main.py --mode analyse $PY_ARGS

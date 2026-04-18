@@ -186,6 +186,9 @@ def main():
     model = DispositionalPredictionModel(cfg.model)
     if args.checkpoint:
         model = load_checkpoint(model, args.checkpoint, device)
+    elif args.mode in ("eval", "analyse"):
+        print("  No checkpoint provided — using random (untrained) weights.")
+    model.to(device)
 
     if args.mode == "train":
         trainer = Trainer(model, train_loader, val_loader, cfg.training,
@@ -195,15 +198,12 @@ def main():
         trainer.evaluate(test_loader, "test")
 
     elif args.mode == "eval":
-        assert args.checkpoint, "--checkpoint required"
-        model.to(device)
         trainer = Trainer(model, train_loader, val_loader, cfg.training,
                           emotion_labels=cfg.model.emotion_labels)
         trainer.evaluate(test_loader, "test")
 
     elif args.mode == "analyse":
-        assert args.checkpoint, "--checkpoint required"
-        model.to(device)
+
         analyser = DispositionalAnalyser(model, test_ds, cfg,
                                          output_dir=args.analysis_dir)
         analyser.run_all()
