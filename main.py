@@ -154,7 +154,9 @@ def main():
     cfg.model.llama_model_name   = args.llama_model
     cfg.model.use_scene_dynamics = not args.no_scene
     cfg.model.use_lora             = not args.no_lora
-    cfg.training.staged_training   = args.staged_training
+    if args.baseline and args.staged_training:
+        print("  [baseline] --staged_training ignored for baseline (no dispositional modules).")
+    cfg.training.staged_training   = args.staged_training and not args.baseline
     cfg.training.batch_size        = args.batch_size
     cfg.training.num_epochs      = args.epochs
     cfg.training.device          = args.device
