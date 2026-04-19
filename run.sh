@@ -278,7 +278,7 @@ run_analyse() {
 echo -e "\n${BOLD}Dispositional Emotion Prediction — Universal Model${NC}"
 echo -e "Mode: ${CYAN}${MODE}${NC}\n"
 
-install_deps
+# install_deps
 
 case "$MODE" in
   sanity)  run_sanity ;;
