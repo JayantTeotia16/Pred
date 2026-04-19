@@ -17,6 +17,7 @@ import torch
 from config import ExperimentConfig, ModelConfig, DataConfig, TrainingConfig
 from data import build_dataloaders, ConversationDataset
 from model import DispositionalPredictionModel
+from baseline import LLaMAClassifier
 from trainer import Trainer
 from analysis import DispositionalAnalyser
 
@@ -144,6 +145,7 @@ def main():
     parser.add_argument("--no_scene",    action="store_true")
     parser.add_argument("--no_lora",          action="store_true")
     parser.add_argument("--staged_training",  action="store_true")
+    parser.add_argument("--baseline",         action="store_true")
     parser.add_argument("--output_dir",  default="./checkpoints")
     parser.add_argument("--analysis_dir",default="./analysis_outputs")
     args = parser.parse_args()
@@ -187,7 +189,11 @@ def main():
 
     print(f"  Emotion classes: {cfg.model.num_emotions} → {cfg.model.emotion_labels}")
 
-    model = DispositionalPredictionModel(cfg.model)
+    if args.baseline:
+        print("  Mode: LLaMA-LoRA baseline (no dispositional modules)")
+        model = LLaMAClassifier(cfg.model)
+    else:
+        model = DispositionalPredictionModel(cfg.model)
     if args.checkpoint:
         model = load_checkpoint(model, args.checkpoint, device)
     elif args.mode in ("eval", "analyse"):
