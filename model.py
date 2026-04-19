@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 
-from transformers import AutoModelForCausalLM
+from transformers import AutoModel
 from config import ModelConfig
 from dispositional_module import (
     PerturbationEncoder,
@@ -51,7 +51,7 @@ class LLaMAEncoder(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         print(f"  Loading LLaMA: {cfg.llama_model_name}")
-        self.llama = AutoModelForCausalLM.from_pretrained(
+        self.llama = AutoModel.from_pretrained(
             cfg.llama_model_name,
             output_hidden_states=True,
             torch_dtype=torch.float16,
