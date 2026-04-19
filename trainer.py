@@ -185,35 +185,57 @@ class Trainer:
         self.model.to(self.device)
         self.loss_fn = PredictionLoss(cfg)
 
-        trainable = model.get_trainable_params()
-        print(f"  Trainable parameters : {sum(p.numel() for p in trainable):,}")
-
-        self.optimizer = AdamW(trainable, lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
-        total_steps    = len(train_loader) * cfg.num_epochs
-        self.scheduler = OneCycleLR(
-            self.optimizer,
-            max_lr=cfg.learning_rate,
-            total_steps=max(total_steps, 1),
-            pct_start=cfg.warmup_steps / max(total_steps, 1),
-        )
-
         os.makedirs(cfg.save_dir, exist_ok=True)
         self.best_val_f1 = 0.0
         self.global_step = 0
         self.history     = []
 
+        # Build initial optimizer (overridden per-phase in staged training)
+        n_epochs = (cfg.phase1_epochs + cfg.phase2_epochs + cfg.phase3_epochs
+                    if cfg.staged_training else cfg.num_epochs)
+        self._rebuild_optimizer(
+            [{"params": model.get_trainable_params(), "lr": cfg.learning_rate}],
+            n_epochs,
+        )
+
     def _to_device(self, batch: Dict) -> Dict:
         return {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()}
 
+    def _rebuild_optimizer(self, param_groups: List[Dict], n_epochs: int):
+        """Build a fresh AdamW + OneCycleLR for a given set of param groups."""
+        self.optimizer = AdamW(param_groups, weight_decay=self.cfg.weight_decay)
+        total_steps    = max(len(self.train_loader) * n_epochs, 1)
+        pct_start      = min(self.cfg.warmup_steps / total_steps, 0.3)
+        max_lrs        = [g["lr"] for g in param_groups]
+        self.scheduler = OneCycleLR(
+            self.optimizer,
+            max_lr=max_lrs if len(max_lrs) > 1 else max_lrs[0],
+            total_steps=total_steps,
+            pct_start=pct_start,
+        )
+        n_params = sum(p.numel() for g in param_groups for p in g["params"])
+        lr_str   = ", ".join(f"{g['lr']:.1e}" for g in param_groups)
+        print(f"  Optimizer: {n_params:,} params | LR(s): [{lr_str}] | {n_epochs} epochs")
+
+    def _save_checkpoint(self, epoch: int, val_m: Dict):
+        path = os.path.join(self.cfg.save_dir, "best_model.pt")
+        torch.save({
+            "epoch":       epoch,
+            "model_state": self.model.state_dict(),
+            "optimizer":   self.optimizer.state_dict(),
+            "metrics":     {k: v for k, v in val_m.items() if k != "report"},
+            "model_cfg":   self.model.cfg,
+        }, path)
+
     # ── Training epoch ─────────────────────────────────────────────────────
 
-    def train_epoch(self, epoch: int) -> Dict:
+    def train_epoch(self, epoch: int, total_epochs: int) -> Dict:
         self.model.train()
         all_preds, all_labels = [], []
         epoch_losses = []
 
-        bar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.cfg.num_epochs} [train]",
+        bar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{total_epochs} [train]",
                    unit="batch", dynamic_ncols=True, leave=False)
 
         for batch in bar:
@@ -313,37 +335,88 @@ class Trainer:
 
     def run(self):
         print("\n=== Training Start ===")
-        epoch_bar = tqdm(range(1, self.cfg.num_epochs + 1), desc="Overall progress",
+        if self.cfg.staged_training:
+            self._run_staged()
+        else:
+            self._run_standard()
+        with open(os.path.join(self.cfg.save_dir, "history.json"), "w") as f:
+            json.dump(self.history, f, indent=2)
+
+    def _run_standard(self):
+        total = self.cfg.num_epochs
+        epoch_bar = tqdm(range(1, total + 1), desc="Overall progress",
                          unit="epoch", dynamic_ncols=True)
-
         for epoch in epoch_bar:
-            train_m = self.train_epoch(epoch)
-            val_m   = self.evaluate(self.val_loader, "val")
+            self._do_epoch(epoch, total, epoch_bar, phase_tag="")
+        epoch_bar.close()
+        print(f"\n=== Done. Best Val F1: {self.best_val_f1:.4f} ===")
 
-            wf1 = val_m["val_wf1"]
-            epoch_bar.set_postfix(
-                val_f1=f"{wf1:.4f}",
-                best=f"{self.best_val_f1:.4f}",
-                train_f1=f"{train_m['train_wf1']:.4f}",
-            )
+    def _run_staged(self):
+        cfg = self.cfg
+        phases = [
+            (1, cfg.phase1_epochs, "P1-warmup",  False),
+            (2, cfg.phase2_epochs, "P2-joint",   True),
+            (3, cfg.phase3_epochs, "P3-refine",  False),
+        ]
+        total = cfg.phase1_epochs + cfg.phase2_epochs + cfg.phase3_epochs
 
-            if wf1 > self.best_val_f1:
-                self.best_val_f1 = wf1
-                path = os.path.join(self.cfg.save_dir, "best_model.pt")
-                torch.save({
-                    "epoch":       epoch,
-                    "model_state": self.model.state_dict(),
-                    "optimizer":   self.optimizer.state_dict(),
-                    "metrics":     {k: v for k, v in val_m.items() if k != "report"},
-                    "model_cfg":   self.model.cfg,
-                }, path)
-                tqdm.write(f"  *** Epoch {epoch}: new best val F1 {wf1:.4f} → saved ***")
+        tqdm.write(f"  Staged training: {cfg.phase1_epochs}+{cfg.phase2_epochs}+"
+                   f"{cfg.phase3_epochs} = {total} epochs")
 
-            self.history.append({**train_m,
-                                  **{k: v for k, v in val_m.items() if k != "report"},
-                                  "epoch": epoch})
+        epoch_bar = tqdm(total=total, desc="Overall progress",
+                         unit="epoch", dynamic_ncols=True)
+        global_epoch = 0
+
+        for phase_num, n_epochs, tag, lora_active in phases:
+            if n_epochs == 0:
+                continue
+
+            # ── Phase banner ──────────────────────────────────────────────
+            labels = {1: "warm-up (LoRA frozen → dispositional only)",
+                      2: "joint   (LoRA + dispositional, separate LRs)",
+                      3: "refine  (LoRA frozen → dispositional converges)"}
+            tqdm.write(f"\n{'─'*55}\n  Phase {phase_num}: {labels[phase_num]}\n{'─'*55}")
+
+            # ── Freeze / unfreeze LoRA ────────────────────────────────────
+            if lora_active:
+                self.model.unfreeze_lora()
+                param_groups = [
+                    {"params": self.model._dispositional_params(), "lr": cfg.learning_rate},
+                    {"params": self.model._lora_params(),          "lr": cfg.lora_lr},
+                ]
+            else:
+                self.model.freeze_lora()
+                param_groups = [
+                    {"params": self.model.get_trainable_params(), "lr": cfg.learning_rate},
+                ]
+
+            self._rebuild_optimizer(param_groups, n_epochs)
+
+            # ── Epochs in this phase ──────────────────────────────────────
+            for _ in range(n_epochs):
+                global_epoch += 1
+                self._do_epoch(global_epoch, total, epoch_bar, phase_tag=tag)
 
         epoch_bar.close()
         print(f"\n=== Done. Best Val F1: {self.best_val_f1:.4f} ===")
-        with open(os.path.join(self.cfg.save_dir, "history.json"), "w") as f:
-            json.dump(self.history, f, indent=2)
+
+    def _do_epoch(self, epoch: int, total_epochs: int, epoch_bar, phase_tag: str):
+        train_m = self.train_epoch(epoch, total_epochs)
+        val_m   = self.evaluate(self.val_loader, "val")
+        wf1     = val_m["val_wf1"]
+
+        postfix = dict(val_f1=f"{wf1:.4f}", best=f"{self.best_val_f1:.4f}",
+                       train_f1=f"{train_m['train_wf1']:.4f}")
+        if phase_tag:
+            postfix["phase"] = phase_tag
+        epoch_bar.set_postfix(**postfix)
+        epoch_bar.update(1)
+
+        if wf1 > self.best_val_f1:
+            self.best_val_f1 = wf1
+            self._save_checkpoint(epoch, val_m)
+            tqdm.write(f"  *** Epoch {epoch}: new best val F1 {wf1:.4f} → saved ***")
+
+        self.history.append({**train_m,
+                              **{k: v for k, v in val_m.items() if k != "report"},
+                              "epoch": epoch, "phase": phase_tag})

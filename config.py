@@ -102,19 +102,26 @@ class DataConfig:
 @dataclass
 class TrainingConfig:
     batch_size: int      = 8
-    num_epochs: int      = 25
+    num_epochs: int      = 25   # used only when staged_training=False
     learning_rate: float = 3e-4
-    weight_decay: float  = 1e-4
+    weight_decay: float  = 1e-3  # raised for regularisation
     warmup_steps: int    = 100
     grad_clip: float     = 1.0
 
     prediction_loss_weight: float  = 1.0
-    surprise_reg_weight: float     = 0.5    # raised from 0.01 — was effectively ignored
-    contrastive_loss_weight: float = 0.1    # speaker contrastive loss
+    surprise_reg_weight: float     = 0.5
+    contrastive_loss_weight: float = 0.01   # lowered — was dominating loss
     contrastive_temperature: float = 0.1
-    min_history_turns: int         = 1    # turns with no history excluded from loss
+    min_history_turns: int         = 1
 
-    max_conversation_length: int  = 30
+    max_conversation_length: int   = 30
+
+    # ── Staged training ───────────────────────────────────────────────────
+    staged_training: bool  = False
+    phase1_epochs: int     = 5    # warm-up : LoRA frozen, dispositional only
+    phase2_epochs: int     = 15   # joint   : LoRA + dispositional co-adapt
+    phase3_epochs: int     = 5    # refine  : LoRA frozen, dispositional converges
+    lora_lr: float         = 3e-5 # separate (smaller) LR for LoRA in phase 2
 
     log_every: int = 50
     save_dir: str  = "./checkpoints"

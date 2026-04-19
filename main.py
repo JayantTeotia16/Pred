@@ -142,7 +142,8 @@ def main():
     parser.add_argument("--epochs",      type=int,   default=25)
     parser.add_argument("--device",      default="cuda")
     parser.add_argument("--no_scene",    action="store_true")
-    parser.add_argument("--no_lora",     action="store_true")
+    parser.add_argument("--no_lora",          action="store_true")
+    parser.add_argument("--staged_training",  action="store_true")
     parser.add_argument("--output_dir",  default="./checkpoints")
     parser.add_argument("--analysis_dir",default="./analysis_outputs")
     args = parser.parse_args()
@@ -150,8 +151,9 @@ def main():
     cfg = ExperimentConfig()
     cfg.model.llama_model_name   = args.llama_model
     cfg.model.use_scene_dynamics = not args.no_scene
-    cfg.model.use_lora           = not args.no_lora
-    cfg.training.batch_size      = args.batch_size
+    cfg.model.use_lora             = not args.no_lora
+    cfg.training.staged_training   = args.staged_training
+    cfg.training.batch_size        = args.batch_size
     cfg.training.num_epochs      = args.epochs
     cfg.training.device          = args.device
     cfg.training.save_dir        = args.output_dir

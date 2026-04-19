@@ -96,6 +96,7 @@ EPOCHS=25
 DEVICE="cuda"
 NO_SCENE=""
 NO_LORA=""
+STAGED=""
 OUTPUT_DIR="./checkpoints"
 ANALYSIS_DIR="./analysis_outputs"
 
@@ -118,7 +119,8 @@ while [[ $# -gt 0 ]]; do
     --epochs)          EPOCHS="$2";          shift 2 ;;
     --device)          DEVICE="$2";          shift 2 ;;
     --no_scene)        NO_SCENE="--no_scene"; shift ;;
-    --no_lora)         NO_LORA="--no_lora";  shift ;;
+    --no_lora)         NO_LORA="--no_lora";      shift ;;
+    --staged_training) STAGED="--staged_training"; shift ;;
     --output_dir)      OUTPUT_DIR="$2";      shift 2 ;;
     --analysis_dir)    ANALYSIS_DIR="$2";    shift 2 ;;
     *) err "Unknown option: $1" ;;
@@ -167,6 +169,7 @@ build_py_args() {
   [[ -n "$SPEAKER_COL" ]]  && args+=" --speaker_col $SPEAKER_COL"
   [[ -n "$NO_SCENE" ]]     && args+=" $NO_SCENE"
   [[ -n "$NO_LORA" ]]      && args+=" $NO_LORA"
+  [[ -n "$STAGED" ]]       && args+=" $STAGED"
   [[ -n "$CHECKPOINT" ]]   && args+=" --checkpoint $CHECKPOINT"
   if [[ -n "$LOCAL_DATA" ]]; then
     args+=" --local_data $LOCAL_DATA"

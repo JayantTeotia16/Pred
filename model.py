@@ -272,6 +272,29 @@ class DispositionalPredictionModel(nn.Module):
     def get_trainable_params(self) -> List[nn.Parameter]:
         return [p for p in self.parameters() if p.requires_grad]
 
+    # ── Staged-training helpers ────────────────────────────────────────────
+
+    def _lora_params(self) -> List[nn.Parameter]:
+        """LoRA adapter parameters only (may be empty if use_lora=False)."""
+        return [p for name, p in self.llama_encoder.llama.named_parameters()
+                if "lora_" in name]
+
+    def _dispositional_params(self) -> List[nn.Parameter]:
+        """All parameters except the LLaMA/LoRA encoder."""
+        llama_ids = {id(p) for p in self.llama_encoder.parameters()}
+        return [p for p in self.parameters()
+                if p.requires_grad and id(p) not in llama_ids]
+
+    def freeze_lora(self):
+        for p in self._lora_params():
+            p.requires_grad = False
+        print("  LoRA frozen — training dispositional modules only.")
+
+    def unfreeze_lora(self):
+        for p in self._lora_params():
+            p.requires_grad = True
+        print("  LoRA unfrozen — joint training.")
+
     def rebuild_prediction_head(self, num_emotions: int):
         """
         Call after loading data if num_emotions changed (e.g. switching datasets).
