@@ -189,53 +189,48 @@ class DispositionalPredictionModel(nn.Module):
         # speaker_ids passed for cross-speaker context (SRA)
         disp_states = self.personal_dynamics(all_delta_u, all_spk_ctx, valid_mask, speaker_ids)
 
-        # ── Phase 4: predictions + posterior + scene + surprise ───────────
-        scene_s = self.scene_dynamics.initial_state(B, device) if self.scene_dynamics else None
-        all_prior, all_post, all_fut1, all_fut2 = [], [], [], []
-        all_states, all_surprise = [], []
-        prev_logits = None
+        # ── Phase 4a: scene states — must be sequential (each step depends on prev) ──
+        if self.scene_dynamics is not None:
+            scene_list = []
+            scene_s    = self.scene_dynamics.initial_state(B, device)
+            for t in range(T):
+                scene_list.append(scene_s)
+                if t < T - 1:
+                    scene_s_new = self.scene_dynamics.step(scene_s, disp_states[:, t])
+                    scene_s = torch.where(
+                        valid_mask[:, t].unsqueeze(-1), scene_s_new, scene_s
+                    )
+            scene_states = torch.stack(scene_list, dim=1)   # (B, T, Ds)
+        else:
+            scene_states = None
 
-        for t in range(T):
-            valid_t  = valid_mask[:, t].float()
-            s_prior  = disp_states[:, t]
-            delta_u_t = all_delta_u[:, t]
+        # ── Phase 4b: batched predictions — 4 head calls instead of 4*T ──────
+        s_flat  = disp_states.view(B * T, -1)                            # (B*T, sd)
+        du_flat = all_delta_u.view(B * T, -1)                            # (B*T, pd)
+        sc_flat = scene_states.view(B * T, -1) if scene_states is not None else None
 
-            # Prior prediction (main — history only, no current utterance)
-            logits_prior = self.prediction_head(s_prior, scene_s)
-            all_prior.append(logits_prior)
-            all_states.append(s_prior)
+        prior_logits = self.prediction_head(s_flat, sc_flat).view(B, T, -1)
+        fut1_logits  = self.future_head_1(s_flat, sc_flat).view(B, T, -1)
+        fut2_logits  = self.future_head_2(s_flat, sc_flat).view(B, T, -1)
+        s_post_flat  = self.fusion_gate(s_flat, du_flat)
+        post_logits  = self.posterior_head(s_post_flat, sc_flat).view(B, T, -1)
 
-            # Auxiliary: predict e(t+1) and e(t+2) from prior state
-            all_fut1.append(self.future_head_1(s_prior, scene_s))
-            all_fut2.append(self.future_head_2(s_prior, scene_s))
-
-            # Posterior: fuse prior with current utterance
-            s_post = self.fusion_gate(s_prior, delta_u_t)
-            all_post.append(self.posterior_head(s_post, scene_s))
-
-            # Surprise: KL between consecutive prior predictions
-            if prev_logits is not None:
-                p_prev     = F.softmax(prev_logits,   dim=-1)
-                p_curr     = F.softmax(logits_prior,  dim=-1)
-                surprise_t = F.kl_div(
-                    p_prev.log().clamp(min=-10), p_curr, reduction="none"
-                ).sum(-1)
-            else:
-                surprise_t = torch.zeros(B, device=device)
-            all_surprise.append(surprise_t * valid_t)
-            prev_logits = logits_prior
-
-            if self.scene_dynamics is not None and t < T - 1:
-                scene_s_new = self.scene_dynamics.step(scene_s, s_prior)
-                scene_s = torch.where(valid_t.bool().unsqueeze(-1), scene_s_new, scene_s)
+        # ── Phase 4c: vectorized surprise (KL between consecutive priors) ─────
+        p = F.softmax(prior_logits, dim=-1)                              # (B, T, E)
+        kl = F.kl_div(
+            p[:, :-1].log().clamp(min=-10), p[:, 1:], reduction="none"
+        ).sum(-1)                                                        # (B, T-1)
+        surprise = torch.cat(
+            [torch.zeros(B, 1, device=device), kl], dim=1
+        ) * valid_mask.float()                                           # (B, T)
 
         return {
-            "prediction_logits":    torch.stack(all_prior,    dim=1),  # (B, T, E)
-            "posterior_logits":     torch.stack(all_post,     dim=1),  # (B, T, E)
-            "future_logits_1":      torch.stack(all_fut1,     dim=1),  # (B, T, E)
-            "future_logits_2":      torch.stack(all_fut2,     dim=1),  # (B, T, E)
-            "dispositional_states": torch.stack(all_states,   dim=1),  # (B, T, D)
-            "surprise":             torch.stack(all_surprise, dim=1),  # (B, T)
+            "prediction_logits":    prior_logits,                        # (B, T, E)
+            "posterior_logits":     post_logits,                         # (B, T, E)
+            "future_logits_1":      fut1_logits,                         # (B, T, E)
+            "future_logits_2":      fut2_logits,                         # (B, T, E)
+            "dispositional_states": disp_states,                         # (B, T, D)
+            "surprise":             surprise,                            # (B, T)
             "speaker_contexts":     all_spk_ctx,
             "speaker_ids":          speaker_ids,
             "emotion_ids":          emotion_ids,

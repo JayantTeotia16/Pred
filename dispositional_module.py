@@ -136,21 +136,45 @@ class CausalTransformerDynamics(nn.Module):
     ) -> torch.Tensor:
         """
         For each turn t, compute the causal mean of δu from OTHER speakers
-        at positions 0..t-1. Strictly causal — turn t cannot see turn t.
+        at positions 0..t-1. Fully vectorised — no Python loop.
+
+        Strategy: exclusive_cumsum(all δu) − exclusive_cumsum(same-speaker δu)
         """
         B, T, pd = all_delta_u.shape
         device   = all_delta_u.device
-        cross    = torch.zeros(B, T, pd, device=device)
-        valid_f  = valid_mask.float()
+        valid_f  = valid_mask.float()                         # (B, T)
+        weighted = all_delta_u * valid_f.unsqueeze(-1)        # (B, T, pd)
 
-        for t in range(1, T):
-            spk_curr  = speaker_ids[:, t:t+1]            # (B, 1)
-            diff_spk  = (speaker_ids[:, :t] != spk_curr).float()  # (B, t)
-            weights   = (diff_spk * valid_f[:, :t]).unsqueeze(-1)  # (B, t, 1)
-            total     = weights.sum(1).clamp(min=1e-9)   # (B, 1)
-            cross[:, t] = (all_delta_u[:, :t] * weights).sum(1) / total
+        # Exclusive total cumulative sum: turn t sees sum of 0..t-1
+        cum_all     = torch.zeros(B, T, pd, device=device)
+        cum_all[:, 1:] = torch.cumsum(weighted, dim=1)[:, :-1]
 
-        return cross   # (B, T, pd)
+        cnt_all     = torch.zeros(B, T, device=device)
+        cnt_all[:, 1:] = torch.cumsum(valid_f, dim=1)[:, :-1]
+
+        # Per-speaker exclusive cumsum via one-hot scatter
+        S        = min(int(speaker_ids.max().item()) + 1, 16)   # cap at MAX_LOCAL_SPEAKERS
+        spk_long = speaker_ids.long().clamp(max=S - 1)
+        onehot   = torch.zeros(B, T, S, device=device)
+        onehot.scatter_(2, spk_long.unsqueeze(-1), 1.0)         # (B, T, S)
+
+        per_spk_w   = weighted.unsqueeze(2) * onehot.unsqueeze(-1)   # (B, T, S, pd)
+        per_spk_cum = torch.zeros(B, T, S, pd, device=device)
+        per_spk_cum[:, 1:] = torch.cumsum(per_spk_w, dim=1)[:, :-1]
+
+        spk_valid   = onehot * valid_f.unsqueeze(-1)                  # (B, T, S)
+        per_spk_cnt = torch.zeros(B, T, S, device=device)
+        per_spk_cnt[:, 1:] = torch.cumsum(spk_valid, dim=1)[:, :-1]
+
+        # Gather same-speaker cumulative for each turn
+        idx_pd   = spk_long.unsqueeze(-1).unsqueeze(-1).expand(B, T, 1, pd)
+        same_cum = per_spk_cum.gather(2, idx_pd).squeeze(2)           # (B, T, pd)
+        idx_s    = spk_long.unsqueeze(-1)
+        same_cnt = per_spk_cnt.gather(2, idx_s).squeeze(-1)           # (B, T)
+
+        cross_cum = cum_all - same_cum                                  # (B, T, pd)
+        cross_cnt = (cnt_all - same_cnt).unsqueeze(-1).clamp(min=1e-9) # (B, T, 1)
+        return cross_cum / cross_cnt                                    # (B, T, pd)
 
     def forward(
         self,
