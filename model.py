@@ -31,6 +31,7 @@ from dispositional_module import (
     PerturbationEncoder,
     DynamicSpeakerContext,
     CausalTransformerDynamics,
+    FusionGate,
     SceneDynamicsField,
     PredictionHead,
 )
@@ -124,11 +125,19 @@ class DispositionalPredictionModel(nn.Module):
         self.speaker_context    = DynamicSpeakerContext(cfg)
         self.personal_dynamics  = CausalTransformerDynamics(cfg)
         self.scene_dynamics     = SceneDynamicsField(cfg) if cfg.use_scene_dynamics else None
-        self.prediction_head    = PredictionHead(
-            state_dim       = cfg.dispositional_state_dim,
-            num_emotions    = cfg.num_emotions,
-            scene_state_dim = cfg.scene_state_dim if cfg.use_scene_dynamics else 0,
-        )
+
+        scene_dim = cfg.scene_state_dim if cfg.use_scene_dynamics else 0
+
+        # Primary prior head
+        self.prediction_head  = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
+
+        # Auxiliary: multi-step future prediction heads (training only)
+        self.future_head_1    = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
+        self.future_head_2    = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
+
+        # Prior + posterior fusion
+        self.fusion_gate      = FusionGate(cfg.dispositional_state_dim, cfg.perturbation_dim)
+        self.posterior_head   = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
 
     # ── Forward ────────────────────────────────────────────────────────────
 
@@ -177,43 +186,56 @@ class DispositionalPredictionModel(nn.Module):
         all_spk_ctx = torch.stack(all_spk_ctx, dim=1)   # (B, T, cd)
 
         # ── Phase 3: causal transformer → dispositional states ────────────
-        # Returns (B, T, state_dim); state[t] uses only history 0..t-1
-        disp_states = self.personal_dynamics(all_delta_u, all_spk_ctx, valid_mask)
+        # speaker_ids passed for cross-speaker context (SRA)
+        disp_states = self.personal_dynamics(all_delta_u, all_spk_ctx, valid_mask, speaker_ids)
 
-        # ── Phase 4: scene dynamics + prediction + surprise ───────────────
-        scene_s    = self.scene_dynamics.initial_state(B, device) if self.scene_dynamics else None
-        all_logits, all_states, all_surprise = [], [], []
+        # ── Phase 4: predictions + posterior + scene + surprise ───────────
+        scene_s = self.scene_dynamics.initial_state(B, device) if self.scene_dynamics else None
+        all_prior, all_post, all_fut1, all_fut2 = [], [], [], []
+        all_states, all_surprise = [], []
         prev_logits = None
 
         for t in range(T):
-            valid_t = valid_mask[:, t].float()
-            s       = disp_states[:, t]
+            valid_t  = valid_mask[:, t].float()
+            s_prior  = disp_states[:, t]
+            delta_u_t = all_delta_u[:, t]
 
-            logits_t = self.prediction_head(s, scene_s)
-            all_logits.append(logits_t)
-            all_states.append(s)
+            # Prior prediction (main — history only, no current utterance)
+            logits_prior = self.prediction_head(s_prior, scene_s)
+            all_prior.append(logits_prior)
+            all_states.append(s_prior)
 
+            # Auxiliary: predict e(t+1) and e(t+2) from prior state
+            all_fut1.append(self.future_head_1(s_prior, scene_s))
+            all_fut2.append(self.future_head_2(s_prior, scene_s))
+
+            # Posterior: fuse prior with current utterance
+            s_post = self.fusion_gate(s_prior, delta_u_t)
+            all_post.append(self.posterior_head(s_post, scene_s))
+
+            # Surprise: KL between consecutive prior predictions
             if prev_logits is not None:
-                p_prev     = F.softmax(prev_logits, dim=-1)
-                p_curr     = F.softmax(logits_t,    dim=-1)
+                p_prev     = F.softmax(prev_logits,   dim=-1)
+                p_curr     = F.softmax(logits_prior,  dim=-1)
                 surprise_t = F.kl_div(
                     p_prev.log().clamp(min=-10), p_curr, reduction="none"
                 ).sum(-1)
             else:
                 surprise_t = torch.zeros(B, device=device)
             all_surprise.append(surprise_t * valid_t)
-            prev_logits = logits_t
+            prev_logits = logits_prior
 
             if self.scene_dynamics is not None and t < T - 1:
-                scene_s_new = self.scene_dynamics.step(scene_s, s)
-                scene_s = torch.where(
-                    valid_t.bool().unsqueeze(-1), scene_s_new, scene_s
-                )
+                scene_s_new = self.scene_dynamics.step(scene_s, s_prior)
+                scene_s = torch.where(valid_t.bool().unsqueeze(-1), scene_s_new, scene_s)
 
         return {
-            "prediction_logits":    torch.stack(all_logits,   dim=1),
-            "dispositional_states": torch.stack(all_states,   dim=1),
-            "surprise":             torch.stack(all_surprise, dim=1),
+            "prediction_logits":    torch.stack(all_prior,    dim=1),  # (B, T, E)
+            "posterior_logits":     torch.stack(all_post,     dim=1),  # (B, T, E)
+            "future_logits_1":      torch.stack(all_fut1,     dim=1),  # (B, T, E)
+            "future_logits_2":      torch.stack(all_fut2,     dim=1),  # (B, T, E)
+            "dispositional_states": torch.stack(all_states,   dim=1),  # (B, T, D)
+            "surprise":             torch.stack(all_surprise, dim=1),  # (B, T)
             "speaker_contexts":     all_spk_ctx,
             "speaker_ids":          speaker_ids,
             "emotion_ids":          emotion_ids,
@@ -247,12 +269,11 @@ class DispositionalPredictionModel(nn.Module):
         print("  LoRA unfrozen — joint training.")
 
     def rebuild_prediction_head(self, num_emotions: int):
-        """
-        Call after loading data if num_emotions changed (e.g. switching datasets).
-        Replaces the prediction head with correct output size.
-        """
+        """Rebuild all prediction heads when switching datasets."""
         scene_dim = self.cfg.scene_state_dim if self.cfg.use_scene_dynamics else 0
-        self.prediction_head = PredictionHead(
-            self.cfg.dispositional_state_dim, num_emotions, scene_dim
-        )
+        sd        = self.cfg.dispositional_state_dim
+        self.prediction_head = PredictionHead(sd, num_emotions, scene_dim)
+        self.future_head_1   = PredictionHead(sd, num_emotions, scene_dim)
+        self.future_head_2   = PredictionHead(sd, num_emotions, scene_dim)
+        self.posterior_head  = PredictionHead(sd, num_emotions, scene_dim)
         self.cfg.num_emotions = num_emotions

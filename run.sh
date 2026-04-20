@@ -20,19 +20,31 @@
 #
 # ── Dataset options (examples) ─────────────────────────────────────────────
 #
-#   Default (MELD text-only via HuggingFace):
-#     bash run.sh train
+#   1. MELD — multi-party TV show, 7 emotions (default):
+#     bash run.sh train --staged_training --output_dir ./checkpoints_meld
 #
-#   Any other HuggingFace dataset:
-#     bash run.sh train \
-#       --hf_dataset eusip/silicone --hf_config dyda_e \
-#       --utterance_col Utterance --emotion_col Emotion \
-#       --dialogue_id_col Dialogue_ID --speaker_col "" \
-#       --train_split train --val_split validation --test_split test
+#   2. IEMOCAP — dyadic acted scenarios, 6 emotions:
+#     NOTE: requires HuggingFace access (gated). Run: huggingface-cli login
+#     Prepare local CSVs (train/val/test) from the IEMOCAP corpus, then:
+#     bash run.sh train --staged_training \
+#       --local_data ./data/iemocap \
+#       --utterance_col utterance \
+#       --emotion_col emotion \
+#       --dialogue_id_col session_id \
+#       --speaker_col speaker \
+#       --output_dir ./checkpoints_iemocap
 #
-#   Local CSV files:
+#   3. DailyDialog — open-domain dyadic chat, 7 emotions:
+#     bash run.sh train --staged_training \
+#       --hf_dataset daily_dialog --hf_config default \
+#       --utterance_col dialog --emotion_col emotion \
+#       --dialogue_id_col "" --speaker_col "" \
+#       --train_split train --val_split validation --test_split test \
+#       --output_dir ./checkpoints_dailydialog
+#
+#   Local CSV files (any dataset):
 #     bash run.sh train \
-#       --local_data ./my_data \       # dir with train.csv / val.csv / test.csv
+#       --local_data ./my_data \
 #       --utterance_col text \
 #       --emotion_col label \
 #       --dialogue_id_col conv_id \

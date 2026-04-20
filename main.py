@@ -57,7 +57,7 @@ def sanity_check(cfg: ExperimentConfig):
     import torch.nn as nn
     from dispositional_module import (
         PerturbationEncoder, DynamicSpeakerContext,
-        CausalTransformerDynamics, SceneDynamicsField, PredictionHead,
+        CausalTransformerDynamics, FusionGate, SceneDynamicsField, PredictionHead,
     )
 
     # Mock LLaMA — returns (B*T, L, H) matching real encoder output
@@ -69,14 +69,18 @@ def sanity_check(cfg: ExperimentConfig):
     model = DispositionalPredictionModel.__new__(DispositionalPredictionModel)
     nn.Module.__init__(model)
     model.cfg = cfg.model
+    sd, E_  = cfg.model.dispositional_state_dim, cfg.model.num_emotions
+    sc      = cfg.model.scene_state_dim
     model.llama_encoder    = MockLLaMA(cfg.model.llama_hidden_size)
     model.perturbation_enc = PerturbationEncoder(cfg.model.llama_hidden_size, cfg.model.perturbation_dim)
     model.speaker_context  = DynamicSpeakerContext(cfg.model)
     model.personal_dynamics= CausalTransformerDynamics(cfg.model)
     model.scene_dynamics   = SceneDynamicsField(cfg.model)
-    model.prediction_head  = PredictionHead(
-        cfg.model.dispositional_state_dim, cfg.model.num_emotions, cfg.model.scene_state_dim
-    )
+    model.prediction_head  = PredictionHead(sd, E_, sc)
+    model.future_head_1    = PredictionHead(sd, E_, sc)
+    model.future_head_2    = PredictionHead(sd, E_, sc)
+    model.fusion_gate      = FusionGate(sd, cfg.model.perturbation_dim)
+    model.posterior_head   = PredictionHead(sd, E_, sc)
 
     B, T, L, E = 2, 6, 10, 7
     emotion_ids = torch.randint(0, E, (B, T))

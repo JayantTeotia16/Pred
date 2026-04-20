@@ -112,9 +112,16 @@ class TrainingConfig:
 
     prediction_loss_weight: float  = 1.0
     surprise_reg_weight: float     = 0.5
-    contrastive_loss_weight: float = 0.01   # lowered — was dominating loss
+    contrastive_loss_weight: float = 0.01
     contrastive_temperature: float = 0.1
     min_history_turns: int         = 1
+
+    # Multi-step future prediction (auxiliary training heads)
+    future_pred_weight_1: float = 0.3   # predict e(t+1) from s(t)
+    future_pred_weight_2: float = 0.1   # predict e(t+2) from s(t)
+
+    # Prior + posterior fusion
+    posterior_loss_weight: float = 0.5  # CE on posterior head during training
 
     max_conversation_length: int   = 30
 

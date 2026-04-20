@@ -3,20 +3,13 @@ dispositional_module.py — Universal dispositional module.
 
 Architecture:
     PerturbationEncoder        LLaMA hidden → δu  (last-token pooling)
-    DynamicSpeakerContext      per-speaker GRU built from that speaker's
-                               past δu vectors → speaker context c ∈ ℝ^D
-    CausalTransformerDynamics  causally-masked transformer over (δu, c) history
-                               → dispositional state s(t) at each turn
+    DynamicSpeakerContext      per-speaker GRU → speaker context c ∈ ℝ^D
+    CausalTransformerDynamics  causally-masked transformer over
+                               (δu, c, cross_ctx) history → s(t)
+                               cross_ctx = mean δu from OTHER speakers (SRA)
+    FusionGate                 s_prior(t) + δu_t → s_posterior(t)
     SceneDynamicsField         shared scene-level ODE (co-regulation)
-    PredictionHead             s(t) → emotion logits (pure prior, no target leakage)
-
-Why transformer over ODE:
-    The ODE was a Markov recurrence — it saw only the immediately previous
-    δu and lost salient past events through the bottleneck. The causal
-    transformer attends directly to any past turn, eliminating:
-      - The mid-history dip (no integration drift)
-      - The single prev_delta_u bottleneck
-      - ODE numerical instability in long conversations
+    PredictionHead             s(t) [+ scene_s] → emotion logits
 """
 
 import torch
@@ -27,24 +20,15 @@ from config import ModelConfig
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Dynamic Speaker Context  —  GRU per speaker, built from utterance history
+# Dynamic Speaker Context
 # ──────────────────────────────────────────────────────────────────────────────
 
 class DynamicSpeakerContext(nn.Module):
-    """
-    Builds a per-speaker context vector from that speaker's past utterances.
-
-    Each speaker in a conversation has their own GRU hidden state.
-    When a speaker takes a turn, their GRU is updated with δu for that
-    utterance. Between turns by other speakers, their state is held constant.
-
-    Speaker IDs are LOCAL to each conversation (0, 1, 2, ...).
-    The model never needs a global speaker vocabulary.
-    """
+    """Per-speaker GRU context built from that speaker's past utterances only."""
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.context_dim     = cfg.speaker_context_dim
+        self.context_dim      = cfg.speaker_context_dim
         self.perturbation_dim = cfg.perturbation_dim
 
         self.gru = nn.GRUCell(
@@ -66,25 +50,23 @@ class DynamicSpeakerContext(nn.Module):
 
     def update(self, states: torch.Tensor, speaker_ids: torch.Tensor, delta_u: torch.Tensor) -> torch.Tensor:
         B, S, _ = states.shape
-        idx   = speaker_ids.clamp(max=S - 1)
-        h_old = states[torch.arange(B, device=states.device), idx]
-        h_new = self.gru(delta_u.float(), h_old.float())
+        idx      = speaker_ids.clamp(max=S - 1)
+        h_old    = states[torch.arange(B, device=states.device), idx]
+        h_new    = self.gru(delta_u.float(), h_old.float())
         states_new = states.clone()
         states_new[torch.arange(B, device=states.device), idx] = h_new
         return states_new
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Perturbation Encoder  —  LLaMA hidden → δu  (last-token pooling)
+# Perturbation Encoder  —  last-token pooling
 # ──────────────────────────────────────────────────────────────────────────────
 
 class PerturbationEncoder(nn.Module):
     """
-    LLaMA hidden states (past utterance) → affective perturbation δu.
-
-    Uses last-token pooling: LLaMA is a causal model so the last valid
-    token has already attended to all previous tokens in the utterance.
-    Last-token pooling captures this richer representation vs mean pooling.
+    LLaMA hidden states → affective perturbation δu.
+    Uses last-token pooling: LLaMA is causal so the last valid token
+    has attended to all prior tokens in the utterance.
     """
 
     def __init__(self, llama_hidden_size: int, perturbation_dim: int):
@@ -97,43 +79,36 @@ class PerturbationEncoder(nn.Module):
         )
 
     def forward(self, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        # hidden: (B, L, H)   mask: (B, L)
-        # Use the last valid token — richest representation in a causal model
-        lengths = mask.sum(1).long() - 1          # (B,) index of last valid token
+        lengths = mask.sum(1).long() - 1
         lengths = lengths.clamp(min=0)
         B       = hidden.shape[0]
-        pooled  = hidden[torch.arange(B, device=hidden.device), lengths]  # (B, H)
+        pooled  = hidden[torch.arange(B, device=hidden.device), lengths]
         return self.proj(pooled.float())
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Causal Transformer Dynamics  —  replaces PersonalDynamicsField (ODE)
+# Causal Transformer Dynamics  —  with Speaker-Relational Attention (SRA)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class CausalTransformerDynamics(nn.Module):
     """
-    Causally-masked transformer over the sequence of (δu_t, c_t) pairs.
+    Causally-masked transformer over per-turn (δu, c, cross_ctx) features.
 
-    State at turn t is computed from inputs at turns 0..t-1 only (no leakage).
+    Speaker-Relational Attention (SRA):
+        cross_ctx[t] = causal mean of δu from speakers OTHER than the current
+        speaker at turn t. This gives each turn awareness of how other
+        speakers have been behaving — interpersonal emotional dynamics —
+        without modifying the attention mechanism itself.
 
-    Implementation:
-        1. Project cat(δu, c) to transformer dim, add positional embedding.
-        2. Apply transformer with causal mask (position t attends to 0..t).
-        3. Shift output right by 1: state[t] = transformer_out[t-1].
-        4. state[0] = learned initial parameter (no history available).
-
-    Advantages over ODE:
-        - Attends directly to any past turn — no Markov bottleneck
-        - No integration drift for long conversations (fixes 15+ bucket)
-        - Multi-head attention learns different emotional timescales
-        - LayerNorm on output stabilises state magnitude
+    Input per turn: cat(δu_t, c_t, cross_ctx_t)  →  project to transformer_dim
+    Output: dispositional states (B, T, state_dim), strictly causal.
     """
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         d = cfg.transformer_dim
-
-        self.input_proj = nn.Linear(cfg.perturbation_dim + cfg.speaker_context_dim, d)
+        # Input: δu + speaker_ctx + cross-speaker δu
+        self.input_proj = nn.Linear(cfg.perturbation_dim * 2 + cfg.speaker_context_dim, d)
         self.pos_embed  = nn.Embedding(cfg.max_conversation_length, d)
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -151,44 +126,88 @@ class CausalTransformerDynamics(nn.Module):
             nn.LayerNorm(cfg.dispositional_state_dim),
         )
 
-        # Learned initial state for turn 0 — no history, start from zero
         self.initial_state = nn.Parameter(torch.zeros(cfg.dispositional_state_dim))
+
+    def _cross_speaker_ctx(
+        self,
+        all_delta_u:  torch.Tensor,   # (B, T, pd)
+        speaker_ids:  torch.Tensor,   # (B, T)
+        valid_mask:   torch.Tensor,   # (B, T) bool
+    ) -> torch.Tensor:
+        """
+        For each turn t, compute the causal mean of δu from OTHER speakers
+        at positions 0..t-1. Strictly causal — turn t cannot see turn t.
+        """
+        B, T, pd = all_delta_u.shape
+        device   = all_delta_u.device
+        cross    = torch.zeros(B, T, pd, device=device)
+        valid_f  = valid_mask.float()
+
+        for t in range(1, T):
+            spk_curr  = speaker_ids[:, t:t+1]            # (B, 1)
+            diff_spk  = (speaker_ids[:, :t] != spk_curr).float()  # (B, t)
+            weights   = (diff_spk * valid_f[:, :t]).unsqueeze(-1)  # (B, t, 1)
+            total     = weights.sum(1).clamp(min=1e-9)   # (B, 1)
+            cross[:, t] = (all_delta_u[:, :t] * weights).sum(1) / total
+
+        return cross   # (B, T, pd)
 
     def forward(
         self,
-        all_delta_u:     torch.Tensor,  # (B, T, perturbation_dim)
-        all_speaker_ctx: torch.Tensor,  # (B, T, speaker_context_dim)
-        valid_mask:      torch.Tensor,  # (B, T) bool  — True = valid turn
+        all_delta_u:     torch.Tensor,   # (B, T, perturbation_dim)
+        all_speaker_ctx: torch.Tensor,   # (B, T, speaker_context_dim)
+        valid_mask:      torch.Tensor,   # (B, T) bool
+        speaker_ids:     torch.Tensor,   # (B, T)
     ) -> torch.Tensor:
-        """Returns dispositional states (B, T, state_dim), strictly causal."""
         B, T, _ = all_delta_u.shape
         device   = all_delta_u.device
 
-        x = torch.cat([all_delta_u, all_speaker_ctx], dim=-1)  # (B, T, pd+cd)
-        x = self.input_proj(x)                                  # (B, T, d)
+        cross_ctx = self._cross_speaker_ctx(all_delta_u, speaker_ids, valid_mask)
 
-        pos = torch.arange(T, device=device)
-        x   = x + self.pos_embed(pos)                           # (B, T, d)
+        x = torch.cat([all_delta_u, all_speaker_ctx, cross_ctx], dim=-1)
+        x = self.input_proj(x)
+        x = x + self.pos_embed(torch.arange(T, device=device))
 
-        # Causal mask: position t can attend to 0..t (upper triangle = -inf)
         causal_mask = torch.triu(
-            torch.full((T, T), float('-inf'), device=device), diagonal=1
+            torch.ones(T, T, dtype=torch.bool, device=device), diagonal=1
         )
-
-        # key_padding_mask: True = ignore this key position (padding turns)
-        out = self.transformer(
-            x,
-            mask=causal_mask,
-            src_key_padding_mask=~valid_mask,
-        )
+        out = self.transformer(x, mask=causal_mask, src_key_padding_mask=~valid_mask)
         out = self.output_proj(out)   # (B, T, state_dim)
 
-        # Shift right: state[t] uses transformer output from t-1
         states        = torch.zeros(B, T, out.shape[-1], device=device)
         states[:, 1:] = out[:, :-1]
         states[:, 0]  = self.initial_state.unsqueeze(0).expand(B, -1)
+        return states
 
-        return states   # (B, T, state_dim)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fusion Gate  —  prior + utterance → posterior
+# ──────────────────────────────────────────────────────────────────────────────
+
+class FusionGate(nn.Module):
+    """
+    Combines the dispositional prior s(t) with the current utterance δu_t
+    to produce a posterior state s'(t).
+
+        gate    = σ(W · cat(s_prior, δu))
+        s_post  = gate ⊙ s_prior + (1−gate) ⊙ proj(δu)
+
+    The gate learns how much to update the prior based on the utterance.
+    Interpretable: high gate value = utterance confirms prior expectations;
+    low gate value = utterance is a surprise, posterior departs from prior.
+    """
+
+    def __init__(self, state_dim: int, perturbation_dim: int):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(state_dim + perturbation_dim, state_dim),
+            nn.Sigmoid(),
+        )
+        self.proj = nn.Linear(perturbation_dim, state_dim)
+
+    def forward(self, s_prior: torch.Tensor, delta_u: torch.Tensor) -> torch.Tensor:
+        gate   = self.gate(torch.cat([s_prior, delta_u], dim=-1))
+        return gate * s_prior + (1.0 - gate) * self.proj(delta_u)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -196,22 +215,16 @@ class CausalTransformerDynamics(nn.Module):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SceneDynamicsField(nn.Module):
-    """
-    Shared scene-level ODE capturing the collective emotional atmosphere.
-    Coupled to personal dynamics via the prediction head (scene state
-    is concatenated to dispositional state before emotion logits).
-    """
+    """Shared scene-level ODE capturing collective emotional atmosphere."""
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.state_dim = cfg.scene_state_dim
-
         self.scene_ode = nn.Sequential(
             nn.Linear(cfg.scene_state_dim + cfg.dispositional_state_dim, 128),
             nn.Tanh(),
             nn.Linear(128, cfg.scene_state_dim),
         )
-
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, std=0.01)
@@ -220,15 +233,9 @@ class SceneDynamicsField(nn.Module):
     def initial_state(self, B: int, device: torch.device) -> torch.Tensor:
         return torch.zeros(B, self.state_dim, device=device)
 
-    def step(
-        self,
-        scene_s: torch.Tensor,    # (B, scene_state_dim)
-        speaker_s: torch.Tensor,  # (B, dispositional_state_dim)
-        dt: float = 1.0,
-    ) -> torch.Tensor:
-        """Returns scene_s_next."""
-        ds_scene = self.scene_ode(torch.cat([scene_s, speaker_s], dim=-1))
-        return scene_s + dt * ds_scene
+    def step(self, scene_s: torch.Tensor, speaker_s: torch.Tensor, dt: float = 1.0) -> torch.Tensor:
+        ds = self.scene_ode(torch.cat([scene_s, speaker_s], dim=-1))
+        return scene_s + dt * ds
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -236,10 +243,7 @@ class SceneDynamicsField(nn.Module):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class PredictionHead(nn.Module):
-    """
-    s(t) + scene_s → P(emotion at turn t).
-    Zero access to turn t's utterance — pure dispositional prior.
-    """
+    """s(t) [+ scene_s] → emotion logits. No access to current utterance."""
 
     def __init__(self, state_dim: int, num_emotions: int, scene_state_dim: int = 0):
         super().__init__()
