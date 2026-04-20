@@ -121,7 +121,7 @@ class TrainingConfig:
     future_pred_weight_2: float = 0.1   # predict e(t+2) from s(t)
 
     # Prior + posterior fusion
-    posterior_loss_weight: float = 0.5  # CE on posterior head during training
+    posterior_loss_weight: float = 0.3  # CE on posterior head during training
 
     max_conversation_length: int   = 30
 
@@ -129,7 +129,7 @@ class TrainingConfig:
     staged_training: bool  = False
     phase1_epochs: int     = 5    # warm-up : LoRA frozen, dispositional only
     phase2_epochs: int     = 3   # joint   : LoRA + dispositional co-adapt
-    phase3_epochs: int     = 5    # refine  : LoRA frozen, dispositional converges
+    phase3_epochs: int     = 8    # refine  : LoRA frozen, dispositional converges
     lora_lr: float         = 3e-5 # separate (smaller) LR for LoRA in phase 2
 
     log_every: int = 50

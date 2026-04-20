@@ -260,7 +260,7 @@ class Trainer:
             B, T, L = batch["input_ids"].shape
             flat_ids  = batch["input_ids"].view(B * T, L)
             flat_mask = batch["attention_mask"].view(B * T, L)
-            with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+            with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"):
                 flat_h = self.model.llama_encoder.encode(flat_ids, flat_mask)
                 flat_d = self.model.perturbation_enc(flat_h, flat_mask)
             delta_u = flat_d.view(B, T, -1).cpu()   # (B, T, pd) on CPU
@@ -312,7 +312,7 @@ class Trainer:
             batch = self._to_device(batch)
             self.optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+            with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"):
                 if delta_cache is not None:
                     outputs = self.model(batch, delta_u_cache=delta_cache)
                 else:
