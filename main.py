@@ -46,7 +46,9 @@ def sanity_check(cfg: ExperimentConfig):
     cfg.model.llama_hidden_size       = 64
     cfg.model.dispositional_state_dim = 16
     cfg.model.perturbation_dim        = 32
-    cfg.model.ode_hidden_dim          = 32
+    cfg.model.transformer_dim         = 32
+    cfg.model.transformer_heads       = 2
+    cfg.model.transformer_layers      = 1
     cfg.model.speaker_context_dim     = 24
     cfg.model.scene_state_dim         = 16
     cfg.model.num_emotions            = 7
@@ -55,13 +57,13 @@ def sanity_check(cfg: ExperimentConfig):
     import torch.nn as nn
     from dispositional_module import (
         PerturbationEncoder, DynamicSpeakerContext,
-        PersonalDynamicsField, SceneDynamicsField, PredictionHead,
+        CausalTransformerDynamics, SceneDynamicsField, PredictionHead,
     )
 
-    # Mock LLaMA
+    # Mock LLaMA — returns (B*T, L, H) matching real encoder output
     class MockLLaMA(nn.Module):
         def __init__(self, H): super().__init__(); self.H = H
-        def encode(self, ids, mask):
+        def encode(self, ids, _mask):
             return torch.randn(ids.shape[0], ids.shape[1], self.H)
 
     model = DispositionalPredictionModel.__new__(DispositionalPredictionModel)
@@ -70,7 +72,7 @@ def sanity_check(cfg: ExperimentConfig):
     model.llama_encoder    = MockLLaMA(cfg.model.llama_hidden_size)
     model.perturbation_enc = PerturbationEncoder(cfg.model.llama_hidden_size, cfg.model.perturbation_dim)
     model.speaker_context  = DynamicSpeakerContext(cfg.model)
-    model.personal_dynamics= PersonalDynamicsField(cfg.model)
+    model.personal_dynamics= CausalTransformerDynamics(cfg.model)
     model.scene_dynamics   = SceneDynamicsField(cfg.model)
     model.prediction_head  = PredictionHead(
         cfg.model.dispositional_state_dim, cfg.model.num_emotions, cfg.model.scene_state_dim
@@ -103,19 +105,16 @@ def sanity_check(cfg: ExperimentConfig):
     for k, v in ld.items():
         print(f"    {k}: {v:.4f}")
 
-    # ── No-leakage invariant: state at t=0 must equal initial zero state ──
-    init_s = model.personal_dynamics.initial_state(B, torch.device("cpu"))
+    # ── No-leakage invariant: state at t=0 must equal learned initial state ──
+    init_s = model.personal_dynamics.initial_state.unsqueeze(0).expand(B, -1)
     state0 = outputs["dispositional_states"][:, 0, :]
     assert torch.allclose(init_s, state0, atol=1e-5), \
         "FAIL: turn-0 state is not the initial state — leakage detected!"
     print("\n  ✓ No-leakage invariant passed.")
 
-    # ── Speaker context is still zero at t=0 ──────────────────────────────
-    from model import MAX_LOCAL_SPEAKERS
-    zero_ctx = model.speaker_context.init_states(B, MAX_LOCAL_SPEAKERS, torch.device("cpu"))
-    # (we can't directly inspect internal spk_ctx after forward, but the
-    #  no-leakage check above is equivalent — if context had been updated
-    #  before t=0 prediction, s(0) would differ from init_s)
+    # ── Speaker context invariant ─────────────────────────────────────────
+    # No-leakage check above is sufficient: if speaker context had been
+    # updated before t=0 prediction, state[0] would differ from initial_state.
     print("  ✓ Speaker context correctly starts at zero.")
     print("\n✓ Sanity check passed.\n")
 

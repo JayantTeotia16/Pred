@@ -23,14 +23,14 @@ derived from what that speaker has said in THIS conversation.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 from transformers import AutoModel
 from config import ModelConfig
 from dispositional_module import (
     PerturbationEncoder,
     DynamicSpeakerContext,
-    PersonalDynamicsField,
+    CausalTransformerDynamics,
     SceneDynamicsField,
     PredictionHead,
 )
@@ -122,7 +122,7 @@ class DispositionalPredictionModel(nn.Module):
         self.llama_encoder      = LLaMAEncoder(cfg)
         self.perturbation_enc   = PerturbationEncoder(cfg.llama_hidden_size, cfg.perturbation_dim)
         self.speaker_context    = DynamicSpeakerContext(cfg)
-        self.personal_dynamics  = PersonalDynamicsField(cfg)
+        self.personal_dynamics  = CausalTransformerDynamics(cfg)
         self.scene_dynamics     = SceneDynamicsField(cfg) if cfg.use_scene_dynamics else None
         self.prediction_head    = PredictionHead(
             state_dim       = cfg.dispositional_state_dim,
@@ -134,136 +134,87 @@ class DispositionalPredictionModel(nn.Module):
 
     def forward(self, batch: Dict) -> Dict:
         """
-        batch keys:
-            input_ids       (B, T, L)
-            attention_mask  (B, T, L)
-            speaker_ids     (B, T)    — LOCAL ids (0,1,2,...) per conversation
-            emotion_ids     (B, T)    — -1 = padding
-            length          (B,)
-            num_speakers    (B,)      — distinct speakers in each conversation
+        Three-phase forward pass:
+          Phase 1 — batched LLaMA encode + perturbation (B*T, L)
+          Phase 2 — GRU speaker context pass (fast, T steps)
+          Phase 3 — causal transformer → dispositional states (batched)
+          Phase 4 — lightweight turn loop for scene dynamics + surprise
 
-        Returns:
-            prediction_logits    (B, T, num_emotions)
-            dispositional_states (B, T, state_dim)
-            surprise             (B, T)
-            emotion_ids          (B, T)
-            lengths              (B,)
+        Strictly causal: predicting emotion at turn t uses only turns 0..t-1.
         """
         B, T, L  = batch["input_ids"].shape
         device   = batch["input_ids"].device
 
-        input_ids      = batch["input_ids"]        # (B, T, L)
-        attention_mask = batch["attention_mask"]   # (B, T, L)
-        speaker_ids    = batch["speaker_ids"]      # (B, T)
-        emotion_ids    = batch["emotion_ids"]      # (B, T)
-        lengths        = batch["length"]           # (B,)
+        input_ids      = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+        speaker_ids    = batch["speaker_ids"]
+        emotion_ids    = batch["emotion_ids"]
+        lengths        = batch["length"]
+        valid_mask     = (emotion_ids >= 0)           # (B, T) bool
 
-        # ── Pre-encode all utterances in ONE batched LLaMA call ──────────
-        # Calling LLaMA T times inside the loop would keep T separate
-        # computation graphs alive simultaneously until loss.backward(),
-        # causing OOM on 8B models. One batched call (B*T, L) produces a
-        # single graph that is freed as soon as backward() runs.
-        flat_ids    = input_ids.view(B * T, L)           # (B*T, L)
-        flat_mask   = attention_mask.view(B * T, L)      # (B*T, L)
-        flat_hidden = self.llama_encoder.encode(flat_ids, flat_mask)       # (B*T, L, H)
-        flat_delta  = self.perturbation_enc(flat_hidden, flat_mask)        # (B*T, pd)
-        all_delta_u = flat_delta.view(B, T, self.cfg.perturbation_dim)    # (B, T, pd)
-        del flat_ids, flat_mask, flat_hidden, flat_delta   # free intermediates early
+        # ── Phase 1: encode all utterances in one LLaMA call ─────────────
+        flat_ids    = input_ids.view(B * T, L)
+        flat_mask   = attention_mask.view(B * T, L)
+        flat_hidden = self.llama_encoder.encode(flat_ids, flat_mask)   # (B*T, L, H)
+        flat_delta  = self.perturbation_enc(flat_hidden, flat_mask)    # (B*T, pd)
+        all_delta_u = flat_delta.view(B, T, self.cfg.perturbation_dim) # (B, T, pd)
+        del flat_ids, flat_mask, flat_hidden, flat_delta
 
-        # ── Initialise states ─────────────────────────────────────────────
+        # ── Phase 2: build speaker contexts turn-by-turn (GRU pass) ──────
+        spk_ctx     = self.speaker_context.init_states(B, MAX_LOCAL_SPEAKERS, device)
+        all_spk_ctx = []
 
-        # Dispositional state — zero for everyone (no prior knowledge)
-        s = self.personal_dynamics.initial_state(B, device)       # (B, D)
-
-        # Dynamic speaker context — zero (no utterance history yet)
-        spk_ctx = self.speaker_context.init_states(
-            B, MAX_LOCAL_SPEAKERS, device
-        )                                                          # (B, S, cd)
-
-        # Scene state — zero
-        scene_s = None
-        if self.scene_dynamics is not None:
-            scene_s = self.scene_dynamics.initial_state(B, device) # (B, Ds)
-
-        # δu from the previous turn (initialised to zero)
-        prev_delta_u = torch.zeros(B, self.cfg.perturbation_dim, device=device)
-
-        # ── Storage ───────────────────────────────────────────────────────
-        all_logits    = []
-        all_states    = []
-        all_surprise  = []
-        all_spk_ctx   = []   # speaker context used at each turn (for contrastive loss)
-        prev_logits   = None
-
-        # ── Autoregressive turn loop ──────────────────────────────────────
         for t in range(T):
-            spk_t   = speaker_ids[:, t]                   # (B,)
-            valid_t = (emotion_ids[:, t] >= 0).float()    # (B,)
+            spk_t   = speaker_ids[:, t]
+            valid_t = valid_mask[:, t].float()
+            all_spk_ctx.append(self.speaker_context.get_context(spk_ctx, spk_t))
+            if t < T - 1:
+                spk_ctx_new = self.speaker_context.update(spk_ctx, spk_t, all_delta_u[:, t])
+                spk_ctx = torch.where(
+                    valid_t.bool().unsqueeze(-1).unsqueeze(-1), spk_ctx_new, spk_ctx
+                )
 
-            # ── 1. Get current speaker context (built from THEIR past turns)
-            c_t = self.speaker_context.get_context(spk_ctx, spk_t)  # (B, cd)
-            all_spk_ctx.append(c_t)
+        all_spk_ctx = torch.stack(all_spk_ctx, dim=1)   # (B, T, cd)
 
-            # ── 2. Step ODE: s(t-1) → s(t)
-            #       Uses prev_delta_u (from turn t-1) and c_t (speaker context
-            #       before seeing turn t) — strictly no leakage from turn t
-            s_next, _ = self.personal_dynamics.step(s, c_t, prev_delta_u)
+        # ── Phase 3: causal transformer → dispositional states ────────────
+        # Returns (B, T, state_dim); state[t] uses only history 0..t-1
+        disp_states = self.personal_dynamics(all_delta_u, all_spk_ctx, valid_mask)
 
-            # Only advance state for non-padding turns
-            s = torch.where(valid_t.bool().unsqueeze(-1), s_next, s)
+        # ── Phase 4: scene dynamics + prediction + surprise ───────────────
+        scene_s    = self.scene_dynamics.initial_state(B, device) if self.scene_dynamics else None
+        all_logits, all_states, all_surprise = [], [], []
+        prev_logits = None
 
-            # ── 3. Predict emotion at turn t (pure prior — zero leakage) ──
-            if self.scene_dynamics is not None:
-                logits_t = self.prediction_head(s, scene_s)
-            else:
-                logits_t = self.prediction_head(s)
+        for t in range(T):
+            valid_t = valid_mask[:, t].float()
+            s       = disp_states[:, t]
+
+            logits_t = self.prediction_head(s, scene_s)
             all_logits.append(logits_t)
             all_states.append(s)
 
-            # ── 4. Surprise: KL divergence between consecutive predictions ──
-            #       Gradients flow so w_surp actually trains the model.
             if prev_logits is not None:
-                p_prev = F.softmax(prev_logits, dim=-1)
-                p_curr = F.softmax(logits_t, dim=-1)
+                p_prev     = F.softmax(prev_logits, dim=-1)
+                p_curr     = F.softmax(logits_t,    dim=-1)
                 surprise_t = F.kl_div(
                     p_prev.log().clamp(min=-10), p_curr, reduction="none"
-                ).sum(-1)                                 # (B,)
+                ).sum(-1)
             else:
                 surprise_t = torch.zeros(B, device=device)
             all_surprise.append(surprise_t * valid_t)
             prev_logits = logits_t
 
-            # ── 5. Consume precomputed δu for turn t to update states ─────
-            #       Runs AFTER prediction is stored — no leakage.
-            #       Gate on valid_t: padding turns must not corrupt states.
-            if t < T - 1:
-                delta_u = all_delta_u[:, t, :]   # (B, pd) — precomputed above
-
-                # Scene dynamics: update scene, get its influence on δu
-                if self.scene_dynamics is not None:
-                    scene_s_new, scene_infl = self.scene_dynamics.step(scene_s, s)
-                    scene_s = torch.where(
-                        valid_t.bool().unsqueeze(-1), scene_s_new, scene_s
-                    )
-                    delta_u = delta_u + scene_infl
-
-                # Update this speaker's context — only for non-padding turns
-                spk_ctx_new = self.speaker_context.update(spk_ctx, spk_t, delta_u)
-                spk_ctx = torch.where(
-                    valid_t.bool().unsqueeze(-1).unsqueeze(-1), spk_ctx_new, spk_ctx
+            if self.scene_dynamics is not None and t < T - 1:
+                scene_s_new = self.scene_dynamics.step(scene_s, s)
+                scene_s = torch.where(
+                    valid_t.bool().unsqueeze(-1), scene_s_new, scene_s
                 )
 
-                # Store δu for next ODE step — only for non-padding turns
-                prev_delta_u = torch.where(
-                    valid_t.bool().unsqueeze(-1), delta_u, prev_delta_u
-                )
-
-        # ── Stack and return ──────────────────────────────────────────────
         return {
-            "prediction_logits":    torch.stack(all_logits,   dim=1),  # (B, T, E)
-            "dispositional_states": torch.stack(all_states,   dim=1),  # (B, T, D)
-            "surprise":             torch.stack(all_surprise, dim=1),  # (B, T)
-            "speaker_contexts":     torch.stack(all_spk_ctx,  dim=1),  # (B, T, cd)
+            "prediction_logits":    torch.stack(all_logits,   dim=1),
+            "dispositional_states": torch.stack(all_states,   dim=1),
+            "surprise":             torch.stack(all_surprise, dim=1),
+            "speaker_contexts":     all_spk_ctx,
             "speaker_ids":          speaker_ids,
             "emotion_ids":          emotion_ids,
             "lengths":              lengths,

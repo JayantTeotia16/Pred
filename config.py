@@ -54,9 +54,11 @@ class ModelConfig:
         "neutral", "surprise", "fear", "sadness", "disgust", "joy", "anger"
     ])
 
-    # ODE integration: step size and sub-steps per turn
-    ode_dt: float  = 1.0
-    ode_steps: int = 4   # RK4 sub-steps per turn (fixes mid-history dip)
+    # Causal Transformer Dynamics (replaces ODE PersonalDynamicsField)
+    transformer_dim: int         = 128
+    transformer_heads: int       = 4
+    transformer_layers: int      = 2
+    max_conversation_length: int = 64   # positional embedding max length
 
 
 @dataclass
