@@ -313,7 +313,10 @@ class Trainer:
             self.optimizer.zero_grad()
 
             with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
-                outputs = self.model(batch, delta_u_cache=delta_cache)
+                if delta_cache is not None:
+                    outputs = self.model(batch, delta_u_cache=delta_cache)
+                else:
+                    outputs = self.model(batch)
                 loss, loss_dict = self.loss_fn(outputs)
 
             self.scaler.scale(loss).backward()

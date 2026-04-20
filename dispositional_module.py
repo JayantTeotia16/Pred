@@ -54,7 +54,7 @@ class DynamicSpeakerContext(nn.Module):
         h_old    = states[torch.arange(B, device=states.device), idx]
         h_new    = self.gru(delta_u.float(), h_old.float())
         states_new = states.clone()
-        states_new[torch.arange(B, device=states.device), idx] = h_new
+        states_new[torch.arange(B, device=states.device), idx] = h_new.to(states.dtype)
         return states_new
 
 
