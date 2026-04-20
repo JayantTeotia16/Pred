@@ -187,6 +187,10 @@ def main():
         return
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     print("Loading data...")
     train_ds, val_ds, test_ds, train_loader, val_loader, test_loader = \

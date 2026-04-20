@@ -23,7 +23,7 @@ derived from what that speaker has said in THIS conversation.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from transformers import AutoModel
 from config import ModelConfig
@@ -141,7 +141,7 @@ class DispositionalPredictionModel(nn.Module):
 
     # ── Forward ────────────────────────────────────────────────────────────
 
-    def forward(self, batch: Dict) -> Dict:
+    def forward(self, batch: Dict, delta_u_cache: Optional[Dict] = None) -> Dict:
         """
         Three-phase forward pass:
           Phase 1 — batched LLaMA encode + perturbation (B*T, L)
@@ -162,12 +162,20 @@ class DispositionalPredictionModel(nn.Module):
         valid_mask     = (emotion_ids >= 0)           # (B, T) bool
 
         # ── Phase 1: encode all utterances in one LLaMA call ─────────────
-        flat_ids    = input_ids.view(B * T, L)
-        flat_mask   = attention_mask.view(B * T, L)
-        flat_hidden = self.llama_encoder.encode(flat_ids, flat_mask)   # (B*T, L, H)
-        flat_delta  = self.perturbation_enc(flat_hidden, flat_mask)    # (B*T, pd)
-        all_delta_u = flat_delta.view(B, T, self.cfg.perturbation_dim) # (B, T, pd)
-        del flat_ids, flat_mask, flat_hidden, flat_delta
+        # If a delta_u cache is provided (frozen-LoRA phases), skip 8B forward
+        dial_ids = batch.get("dialogue_id", None)
+        if (delta_u_cache is not None and dial_ids is not None and
+                all(d in delta_u_cache for d in dial_ids)):
+            all_delta_u = torch.stack(
+                [delta_u_cache[d].to(device) for d in dial_ids], dim=0
+            )  # (B, T, pd)
+        else:
+            flat_ids    = input_ids.view(B * T, L)
+            flat_mask   = attention_mask.view(B * T, L)
+            flat_hidden = self.llama_encoder.encode(flat_ids, flat_mask)   # (B*T, L, H)
+            flat_delta  = self.perturbation_enc(flat_hidden, flat_mask)    # (B*T, pd)
+            all_delta_u = flat_delta.view(B, T, self.cfg.perturbation_dim) # (B, T, pd)
+            del flat_ids, flat_mask, flat_hidden, flat_delta
 
         # ── Phase 2: build speaker contexts turn-by-turn (GRU pass) ──────
         spk_ctx     = self.speaker_context.init_states(B, MAX_LOCAL_SPEAKERS, device)

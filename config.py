@@ -20,7 +20,7 @@ class ModelConfig:
     # LLaMA — past-utterance encoder
     llama_model_name: str  = "meta-llama/Llama-3.1-8B"
     llama_hidden_size: int = 4096
-    llama_max_length: int  = 128
+    llama_max_length: int  = 64
 
     # LoRA fine-tuning on LLaMA (replaces full freeze)
     use_lora: bool      = True

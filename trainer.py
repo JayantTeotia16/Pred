@@ -224,6 +224,7 @@ class Trainer:
 
         self.model.to(self.device)
         self.loss_fn = PredictionLoss(cfg)
+        self.scaler  = torch.cuda.amp.GradScaler(enabled=self.device.type == "cuda")
 
         os.makedirs(cfg.save_dir, exist_ok=True)
         self.best_val_f1 = 0.0
@@ -241,6 +242,33 @@ class Trainer:
     def _to_device(self, batch: Dict) -> Dict:
         return {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()}
+
+    @torch.no_grad()
+    def _build_delta_cache(self) -> Dict:
+        """
+        Precompute delta_u for every conversation with LoRA frozen.
+        Stores {dialogue_id: (T, pd) cpu tensor}.
+        Called once before each frozen phase; skips 8B LLaMA for all
+        subsequent epochs in that phase.
+        """
+        print("  Building delta_u cache (LoRA frozen — one-time cost)...")
+        self.model.eval()
+        cache = {}
+        for batch in tqdm(self.train_loader, desc="  caching", leave=False,
+                          unit="batch", dynamic_ncols=True):
+            batch = self._to_device(batch)
+            B, T, L = batch["input_ids"].shape
+            flat_ids  = batch["input_ids"].view(B * T, L)
+            flat_mask = batch["attention_mask"].view(B * T, L)
+            with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+                flat_h = self.model.llama_encoder.encode(flat_ids, flat_mask)
+                flat_d = self.model.perturbation_enc(flat_h, flat_mask)
+            delta_u = flat_d.view(B, T, -1).cpu()   # (B, T, pd) on CPU
+            for b, did in enumerate(batch["dialogue_id"]):
+                cache[did] = delta_u[b]
+        self.model.train()
+        print(f"  Cache built: {len(cache)} conversations.")
+        return cache
 
     def _rebuild_optimizer(self, param_groups: List[Dict], n_epochs: int):
         """Build a fresh AdamW + OneCycleLR for a given set of param groups."""
@@ -278,15 +306,21 @@ class Trainer:
         bar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{total_epochs} [train]",
                    unit="batch", dynamic_ncols=True, leave=False)
 
-        for batch in bar:
-            batch   = self._to_device(batch)
-            outputs = self.model(batch)
-            loss, loss_dict = self.loss_fn(outputs)
+        delta_cache = getattr(self, "_delta_cache", None)
 
+        for batch in bar:
+            batch = self._to_device(batch)
             self.optimizer.zero_grad()
-            loss.backward()
+
+            with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+                outputs = self.model(batch, delta_u_cache=delta_cache)
+                loss, loss_dict = self.loss_fn(outputs)
+
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
             nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             self.scheduler.step()
 
             epoch_losses.append(loss_dict)
@@ -390,6 +424,7 @@ class Trainer:
             json.dump(self.history, f, indent=2)
 
     def _run_standard(self):
+        self._delta_cache = None
         total = self.cfg.num_epochs
         epoch_bar = tqdm(range(1, total + 1), desc="Overall progress",
                          unit="epoch", dynamic_ncols=True)
@@ -427,12 +462,14 @@ class Trainer:
             # ── Freeze / unfreeze LoRA ────────────────────────────────────
             if lora_active:
                 self.model.unfreeze_lora()
+                self._delta_cache = None   # LoRA updating — cache invalid
                 param_groups = [
                     {"params": self.model._dispositional_params(), "lr": cfg.learning_rate},
                     {"params": self.model._lora_params(),          "lr": cfg.lora_lr},
                 ]
             else:
                 self.model.freeze_lora()
+                self._delta_cache = self._build_delta_cache()  # skip 8B for this phase
                 param_groups = [
                     {"params": self.model.get_trainable_params(), "lr": cfg.learning_rate},
                 ]
