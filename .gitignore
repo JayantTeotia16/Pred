@@ -1,2 +1,5 @@
 checkpoints/
 analysis_outputs/
+__pycache__/
+checkpoints_full/
+checkpoints_baseline/
