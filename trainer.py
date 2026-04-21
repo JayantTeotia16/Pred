@@ -125,6 +125,7 @@ class PredictionLoss(nn.Module):
         L_pred    = (pred_loss * valid).sum() / n
 
         # ── Surprise calibration ──────────────────────────────────────────
+        surprise = torch.nan_to_num(surprise, nan=0.0)
         surp_reg = surprise * (1.0 - torch.exp(-pred_loss.detach()))
         L_surp   = (surp_reg * valid).sum() / n
 

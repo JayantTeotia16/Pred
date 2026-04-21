@@ -224,9 +224,9 @@ class DispositionalPredictionModel(nn.Module):
         post_logits  = self.posterior_head(s_post_flat, sc_flat).view(B, T, -1)
 
         # ── Phase 4c: vectorized surprise (KL between consecutive priors) ─────
-        p = F.softmax(prior_logits, dim=-1)                              # (B, T, E)
+        p = F.softmax(prior_logits, dim=-1).clamp(min=1e-9)             # (B, T, E)
         kl = F.kl_div(
-            p[:, :-1].log().clamp(min=-10), p[:, 1:], reduction="none"
+            p[:, :-1].log(), p[:, 1:].clamp(min=1e-9), reduction="none"
         ).sum(-1)                                                        # (B, T-1)
         surprise = torch.cat(
             [torch.zeros(B, 1, device=device), kl], dim=1
