@@ -12,6 +12,7 @@ Architecture:
     PredictionHead             s(t) [+ scene_s] → emotion logits
 """
 
+import math
 import torch
 import torch.nn as nn
 from typing import Optional
@@ -90,6 +91,32 @@ class PerturbationEncoder(nn.Module):
 # Causal Transformer Dynamics  —  with Speaker-Relational Attention (SRA)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _alibi_slopes(n_heads: int) -> torch.Tensor:
+    """ALiBi per-head slopes — geometric sequence as in Press et al. 2022."""
+    n = 2 ** math.floor(math.log2(n_heads))
+    slopes = torch.pow(2, -torch.arange(1, n + 1) * 8.0 / n)
+    if n < n_heads:
+        # Handle non-power-of-2 head counts
+        extra = torch.pow(2, -torch.arange(1, 2 * (n_heads - n) + 1, 2) * 8.0 / (2 * n))
+        slopes = torch.cat([slopes, extra])
+    return slopes   # (n_heads,)
+
+
+def _alibi_bias(T: int, n_heads: int, device: torch.device) -> torch.Tensor:
+    """
+    Build causal ALiBi bias matrix (n_heads, T, T).
+    Entry [h, i, j] = -slope_h * (i - j)  for j <= i,  else -inf (future masked).
+    """
+    slopes = _alibi_slopes(n_heads).to(device)              # (H,)
+    pos    = torch.arange(T, device=device)
+    dist   = (pos.unsqueeze(1) - pos.unsqueeze(0)).float()  # (T, T), dist[i,j] = i-j
+    bias   = -slopes.view(-1, 1, 1) * dist.unsqueeze(0)     # (H, T, T)
+    # mask future positions with -inf
+    causal = torch.triu(torch.ones(T, T, dtype=torch.bool, device=device), diagonal=1)
+    bias   = bias.masked_fill(causal.unsqueeze(0), float("-inf"))
+    return bias   # (H, T, T)
+
+
 class CausalTransformerDynamics(nn.Module):
     """
     Causally-masked transformer over per-turn (δu, c, cross_ctx) features.
@@ -100,6 +127,12 @@ class CausalTransformerDynamics(nn.Module):
         speakers have been behaving — interpersonal emotional dynamics —
         without modifying the attention mechanism itself.
 
+    ALiBi positional encoding (Press et al. 2022):
+        Replaces absolute positional embeddings with per-head distance
+        penalties on attention scores. Different heads attend at different
+        ranges — some focus on recent turns, others on long-range context.
+        Fixes the mid-history (4-14 turn) attention dip.
+
     Input per turn: cat(δu_t, c_t, cross_ctx_t)  →  project to transformer_dim
     Output: dispositional states (B, T, state_dim), strictly causal.
     """
@@ -107,9 +140,10 @@ class CausalTransformerDynamics(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         d = cfg.transformer_dim
+        self.n_heads = cfg.transformer_heads
         # Input: δu + speaker_ctx + cross-speaker δu
         self.input_proj = nn.Linear(cfg.perturbation_dim * 2 + cfg.speaker_context_dim, d)
-        self.pos_embed  = nn.Embedding(cfg.max_conversation_length, d)
+        # No positional embedding table — ALiBi handles position via attention bias
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d,
@@ -190,12 +224,17 @@ class CausalTransformerDynamics(nn.Module):
 
         x = torch.cat([all_delta_u, all_speaker_ctx, cross_ctx], dim=-1)
         x = self.input_proj(x)
-        x = x + self.pos_embed(torch.arange(T, device=device))
 
-        causal_mask = torch.triu(
-            torch.ones(T, T, dtype=torch.bool, device=device), diagonal=1
-        )
-        out = self.transformer(x, mask=causal_mask, src_key_padding_mask=~valid_mask)
+        # ALiBi bias: (H, T, T) — causal masking + distance penalty, no pos embed needed
+        alibi = _alibi_bias(T, self.n_heads, device)
+        # PyTorch TransformerEncoder expects mask (T, T) or (B*H, T, T);
+        # repeat across batch: (B*H, T, T)
+        alibi_mask = alibi.unsqueeze(0).expand(
+            x.shape[0] * self.n_heads, -1, -1
+        ).reshape(x.shape[0] * self.n_heads, T, T)
+
+        out = self.transformer(x, mask=alibi_mask, src_key_padding_mask=~valid_mask,
+                               is_causal=False)
         out = self.output_proj(out)   # (B, T, state_dim)
 
         states        = torch.zeros(B, T, out.shape[-1], device=device)
