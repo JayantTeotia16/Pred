@@ -232,16 +232,20 @@ class CausalTransformerDynamics(nn.Module):
         B_ = x.shape[0]
         alibi = _alibi_bias(T, self.n_heads, device)               # (H, T, T)
 
-        # Bake padding into the float mask: padded key positions → -inf for all queries
-        # valid_mask: (B, T) True=valid → ~valid_mask marks padding
+        # Bake padding into the float mask: padded key positions → -inf
         pad_bias = torch.zeros(B_, T, T, device=device)
         pad_bias = pad_bias.masked_fill(~valid_mask.unsqueeze(1), float("-inf"))  # (B, T, T)
+        # Protect diagonal: self-attention is always allowed (prevents all-inf rows
+        # for padding queries, which would cause softmax → NaN → gradient collapse)
+        eye = torch.eye(T, dtype=torch.bool, device=device)
+        pad_bias = pad_bias.masked_fill(eye.unsqueeze(0), 0.0)     # restore diagonal
 
-        # Combine: (H, T, T) + (B, T, T) → broadcast over batch/heads → (B*H, T, T)
+        # Combine: (H, T, T) + (B, T, T) → broadcast → (B*H, T, T)
         combined = alibi.unsqueeze(0) + pad_bias.unsqueeze(1)      # (B, H, T, T)
         combined = combined.reshape(B_ * self.n_heads, T, T)       # (B*H, T, T)
 
         out = self.transformer(x, mask=combined, is_causal=False)
+        out = torch.nan_to_num(out, nan=0.0)                       # safety: clear any residual NaN
         out = self.output_proj(out)   # (B, T, state_dim)
 
         states        = torch.zeros(B, T, out.shape[-1], device=device)
