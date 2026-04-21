@@ -225,15 +225,20 @@ class CausalTransformerDynamics(nn.Module):
         x = torch.cat([all_delta_u, all_speaker_ctx, cross_ctx], dim=-1)
         x = self.input_proj(x)
 
-        # ALiBi bias: (H, T, T) — causal masking + distance penalty, no pos embed needed
-        # Expand to (B*H, T, T) as required by PyTorch TransformerEncoder
-        B_  = x.shape[0]
+        # ALiBi bias + padding — single float mask, no bool mask mixing
+        B_ = x.shape[0]
         alibi = _alibi_bias(T, self.n_heads, device)               # (H, T, T)
-        alibi_mask = alibi.unsqueeze(0).expand(B_, -1, -1, -1) \
-                          .reshape(B_ * self.n_heads, T, T)        # (B*H, T, T)
 
-        out = self.transformer(x, mask=alibi_mask, src_key_padding_mask=~valid_mask,
-                               is_causal=False)
+        # Bake padding into the float mask: padded key positions → -inf for all queries
+        # valid_mask: (B, T) True=valid → ~valid_mask marks padding
+        pad_bias = torch.zeros(B_, T, T, device=device)
+        pad_bias = pad_bias.masked_fill(~valid_mask.unsqueeze(1), float("-inf"))  # (B, T, T)
+
+        # Combine: (H, T, T) + (B, T, T) → broadcast over batch/heads → (B*H, T, T)
+        combined = alibi.unsqueeze(0) + pad_bias.unsqueeze(1)      # (B, H, T, T)
+        combined = combined.reshape(B_ * self.n_heads, T, T)       # (B*H, T, T)
+
+        out = self.transformer(x, mask=combined, is_causal=False)
         out = self.output_proj(out)   # (B, T, state_dim)
 
         states        = torch.zeros(B, T, out.shape[-1], device=device)
