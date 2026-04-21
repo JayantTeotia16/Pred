@@ -226,12 +226,11 @@ class CausalTransformerDynamics(nn.Module):
         x = self.input_proj(x)
 
         # ALiBi bias: (H, T, T) — causal masking + distance penalty, no pos embed needed
-        alibi = _alibi_bias(T, self.n_heads, device)
-        # PyTorch TransformerEncoder expects mask (T, T) or (B*H, T, T);
-        # repeat across batch: (B*H, T, T)
-        alibi_mask = alibi.unsqueeze(0).expand(
-            x.shape[0] * self.n_heads, -1, -1
-        ).reshape(x.shape[0] * self.n_heads, T, T)
+        # Expand to (B*H, T, T) as required by PyTorch TransformerEncoder
+        B_  = x.shape[0]
+        alibi = _alibi_bias(T, self.n_heads, device)               # (H, T, T)
+        alibi_mask = alibi.unsqueeze(0).expand(B_, -1, -1, -1) \
+                          .reshape(B_ * self.n_heads, T, T)        # (B*H, T, T)
 
         out = self.transformer(x, mask=alibi_mask, src_key_padding_mask=~valid_mask,
                                is_causal=False)
