@@ -110,6 +110,8 @@ class TrainingConfig:
     warmup_steps: int    = 100
     grad_clip: float     = 1.0
 
+    focal_gamma: float             = 2.0   # focal loss: 0 = standard CE, 2 = standard focal
+    label_smoothing: float         = 0.1   # label smoothing on all CE losses
     prediction_loss_weight: float  = 1.0
     surprise_reg_weight: float     = 0.5
     contrastive_loss_weight: float = 0.01

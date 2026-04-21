@@ -92,7 +92,17 @@ class PredictionLoss(nn.Module):
         self.w_fut2   = cfg.future_pred_weight_2
         self.cont_tmp = cfg.contrastive_temperature
         self.min_hist = cfg.min_history_turns
-        self.ce       = nn.CrossEntropyLoss(ignore_index=-1, reduction="none")
+        self.focal_gamma = cfg.focal_gamma
+        self.ce       = nn.CrossEntropyLoss(
+            ignore_index=-1, reduction="none",
+            label_smoothing=cfg.label_smoothing,
+        )
+
+    def _focal_weight(self, ce_loss: torch.Tensor) -> torch.Tensor:
+        """Focal weight: (1 - exp(-ce))^gamma. Downweights easy (low-loss) examples."""
+        if self.focal_gamma == 0:
+            return torch.ones_like(ce_loss)
+        return (1.0 - torch.exp(-ce_loss.detach())) ** self.focal_gamma
 
     def _masked_ce(self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         B, T, E = logits.shape
@@ -119,10 +129,11 @@ class PredictionLoss(nn.Module):
             cold[:, :self.min_hist] = 0.0
             valid = valid * cold
 
-        # ── Prior loss ────────────────────────────────────────────────────
+        # ── Prior loss (focal + label smoothing) ─────────────────────────
         pred_loss = self.ce(logits_prior.view(B*T, E), labels.view(B*T)).view(B, T)
+        focal_w   = self._focal_weight(pred_loss)
         n         = valid.sum().clamp(min=1)
-        L_pred    = (pred_loss * valid).sum() / n
+        L_pred    = (pred_loss * focal_w * valid).sum() / n
 
         # ── Surprise calibration ──────────────────────────────────────────
         surprise = torch.nan_to_num(surprise, nan=0.0)
