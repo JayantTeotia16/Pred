@@ -55,9 +55,9 @@ class ModelConfig:
     ])
 
     # Causal Transformer Dynamics (replaces ODE PersonalDynamicsField)
-    transformer_dim: int         = 256
+    transformer_dim: int         = 128
     transformer_heads: int       = 4
-    transformer_layers: int      = 3
+    transformer_layers: int      = 2
     max_conversation_length: int = 64   # positional embedding max length
 
 
@@ -111,7 +111,7 @@ class TrainingConfig:
     grad_clip: float     = 1.0
 
     focal_gamma: float             = 2.0   # focal loss: 0 = standard CE, 2 = standard focal
-    label_smoothing: float         = 0.1   # label smoothing on all CE losses
+    label_smoothing: float         = 0.0   # label smoothing (0 = disabled)
     prediction_loss_weight: float  = 1.0
     surprise_reg_weight: float     = 0.5
     contrastive_loss_weight: float = 0.01
