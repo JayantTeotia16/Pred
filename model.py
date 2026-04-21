@@ -166,9 +166,12 @@ class DispositionalPredictionModel(nn.Module):
         dial_ids = batch.get("dialogue_id", None)
         if (delta_u_cache is not None and dial_ids is not None and
                 all(d in delta_u_cache for d in dial_ids)):
-            all_delta_u = torch.stack(
+            # Cache stores pooled LLaMA hiddens (B, T, H_llama) — still run proj MLP
+            flat_pooled = torch.stack(
                 [delta_u_cache[d].to(device) for d in dial_ids], dim=0
-            )  # (B, T, pd)
+            ).view(B * T, -1)                                              # (B*T, H_llama)
+            flat_delta  = self.perturbation_enc.proj(flat_pooled.float())  # (B*T, pd)
+            all_delta_u = flat_delta.view(B, T, self.cfg.perturbation_dim) # (B, T, pd)
         else:
             flat_ids    = input_ids.view(B * T, L)
             flat_mask   = attention_mask.view(B * T, L)

@@ -263,10 +263,11 @@ class Trainer:
             flat_mask = batch["attention_mask"].view(B * T, L)
             with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"):
                 flat_h = self.model.llama_encoder.encode(flat_ids, flat_mask)
-                flat_d = self.model.perturbation_enc(flat_h, flat_mask)
-            delta_u = flat_d.view(B, T, -1).cpu()   # (B, T, pd) on CPU
+                # Cache pooled hidden (before proj MLP) so perturbation_enc stays trainable
+                flat_pooled = self.model.perturbation_enc.pool(flat_h, flat_mask)
+            pooled = flat_pooled.view(B, T, -1).cpu()   # (B, T, H_llama) on CPU
             for b, did in enumerate(batch["dialogue_id"]):
-                cache[did] = delta_u[b]
+                cache[did] = pooled[b]
         self.model.train()
         print(f"  Cache built: {len(cache)} conversations.")
         return cache

@@ -79,12 +79,15 @@ class PerturbationEncoder(nn.Module):
             nn.LayerNorm(perturbation_dim),
         )
 
-    def forward(self, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def pool(self, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Last-token pooling only — result can be cached across frozen epochs."""
         lengths = mask.sum(1).long() - 1
         lengths = lengths.clamp(min=0)
         B       = hidden.shape[0]
-        pooled  = hidden[torch.arange(B, device=hidden.device), lengths]
-        return self.proj(pooled.float())
+        return hidden[torch.arange(B, device=hidden.device), lengths].float()  # (B, H)
+
+    def forward(self, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.pool(hidden, mask))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
