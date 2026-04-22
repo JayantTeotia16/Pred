@@ -14,9 +14,41 @@ Architecture:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
 
 from config import ModelConfig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SIGReg — Gaussian regulariser on dispositional state space (from LeWM)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SIGReg(nn.Module):
+    """
+    Enforces that the distribution of dispositional states across a batch
+    matches an isotropic Gaussian, preventing state-space collapse.
+
+    Method (Cramér-Wold theorem): if all 1D projections of a distribution
+    are Gaussian, the full distribution is Gaussian. We project states onto
+    M random unit directions and penalise deviation from N(0,1) per projection.
+
+    Loss = mean over projections of [μ² + (σ - 1)²]
+    Where μ, σ are mean and std of the projected values.
+    """
+
+    def __init__(self, n_projections: int = 256):
+        super().__init__()
+        self.M = n_projections
+
+    def forward(self, Z: torch.Tensor) -> torch.Tensor:
+        # Z: (N, d) — flattened dispositional states from a batch
+        d = Z.shape[1]
+        u = F.normalize(torch.randn(d, self.M, device=Z.device), dim=0)  # (d, M)
+        proj  = Z.float() @ u                          # (N, M)
+        mu    = proj.mean(0)                            # (M,)
+        sigma = proj.std(0).clamp(min=1e-6)             # (M,)
+        return (mu.pow(2) + (sigma - 1.0).pow(2)).mean()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

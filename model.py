@@ -34,6 +34,7 @@ from dispositional_module import (
     FusionGate,
     SceneDynamicsField,
     PredictionHead,
+    SIGReg,
 )
 
 
@@ -139,6 +140,9 @@ class DispositionalPredictionModel(nn.Module):
         self.fusion_gate      = FusionGate(cfg.dispositional_state_dim, cfg.perturbation_dim)
         self.posterior_head   = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
 
+        # SIGReg — Gaussian regulariser on dispositional state space
+        self.sigreg           = SIGReg(n_projections=256)
+
 
     # ── Forward ────────────────────────────────────────────────────────────
 
@@ -243,6 +247,7 @@ class DispositionalPredictionModel(nn.Module):
             "future_logits_2":      fut2_logits,                         # (B, T, E)
             "dispositional_states": disp_states,                         # (B, T, D)
             "surprise":             surprise,                            # (B, T)
+            "sigreg_loss":          self.sigreg(disp_states.view(B * T, -1)),
             "speaker_contexts":     all_spk_ctx,
             "speaker_ids":          speaker_ids,
             "emotion_ids":          emotion_ids,

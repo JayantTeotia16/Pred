@@ -114,7 +114,8 @@ class TrainingConfig:
     label_smoothing: float         = 0.0   # label smoothing (0 = disabled)
     prediction_loss_weight: float  = 1.0
     surprise_reg_weight: float     = 0.5
-    contrastive_loss_weight: float = 0.01
+    contrastive_loss_weight: float = 0.1
+    sigreg_loss_weight: float      = 0.1    # Gaussian regulariser on dispositional states
     contrastive_temperature: float = 0.1
     min_history_turns: int         = 1
 
