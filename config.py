@@ -24,7 +24,7 @@ class ModelConfig:
 
     # LoRA fine-tuning on LLaMA (replaces full freeze)
     use_lora: bool      = True
-    lora_rank: int      = 16
+    lora_rank: int      = 8
     lora_alpha: int     = 16
     lora_dropout: float = 0.05
 
@@ -114,8 +114,8 @@ class TrainingConfig:
     label_smoothing: float         = 0.0   # label smoothing (0 = disabled)
     prediction_loss_weight: float  = 1.0
     surprise_reg_weight: float     = 0.5
-    contrastive_loss_weight: float = 0.1
-    sigreg_loss_weight: float      = 0.1    # Gaussian regulariser on dispositional states
+    contrastive_loss_weight: float = 0.01
+    sigreg_loss_weight: float      = 0.01   # Gaussian regulariser on dispositional states
     contrastive_temperature: float = 0.1
     min_history_turns: int         = 1
 
