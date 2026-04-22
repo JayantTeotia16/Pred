@@ -139,10 +139,6 @@ class DispositionalPredictionModel(nn.Module):
         self.fusion_gate      = FusionGate(cfg.dispositional_state_dim, cfg.perturbation_dim)
         self.posterior_head   = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
 
-        # Emotion feedback loop (EFL): residual correction of disp_states using
-        # previous turn's predicted emotion distribution — strictly causal.
-        self.efl_head = nn.Linear(cfg.dispositional_state_dim, cfg.num_emotions)
-        self.efl_proj = nn.Linear(cfg.num_emotions, cfg.dispositional_state_dim)
 
     # ── Forward ────────────────────────────────────────────────────────────
 
@@ -204,16 +200,6 @@ class DispositionalPredictionModel(nn.Module):
         # ── Phase 3: causal transformer → dispositional states ────────────
         # speaker_ids passed for cross-speaker context (SRA)
         disp_states = self.personal_dynamics(all_delta_u, all_spk_ctx, valid_mask, speaker_ids)
-
-        # ── Emotion Feedback Loop (EFL) ───────────────────────────────────
-        # Residual correction: for each turn t, adjust disp_states[t] using
-        # the soft emotion prediction from turn t-1 (strictly causal).
-        # efl_head is a cheap linear (not the full prediction_head) to avoid
-        # circular dependency with scene_s which isn't computed yet.
-        soft_e = F.softmax(self.efl_head(disp_states), dim=-1)        # (B, T, E)
-        e_feedback = torch.zeros_like(soft_e)
-        e_feedback[:, 1:] = soft_e[:, :-1].detach()                   # shift right, no grad loop
-        disp_states = disp_states + self.efl_proj(e_feedback)         # residual correction
 
         # ── Phase 4a: scene states — must be sequential (each step depends on prev) ──
         if self.scene_dynamics is not None:
@@ -297,6 +283,4 @@ class DispositionalPredictionModel(nn.Module):
         self.future_head_1   = PredictionHead(sd, num_emotions, scene_dim)
         self.future_head_2   = PredictionHead(sd, num_emotions, scene_dim)
         self.posterior_head  = PredictionHead(sd, num_emotions, scene_dim)
-        self.efl_head        = nn.Linear(sd, num_emotions)
-        self.efl_proj        = nn.Linear(num_emotions, sd)
         self.cfg.num_emotions = num_emotions
