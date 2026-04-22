@@ -24,7 +24,7 @@ class ModelConfig:
 
     # LoRA fine-tuning on LLaMA (replaces full freeze)
     use_lora: bool      = True
-    lora_rank: int      = 8
+    lora_rank: int      = 16
     lora_alpha: int     = 16
     lora_dropout: float = 0.05
 
@@ -110,7 +110,7 @@ class TrainingConfig:
     warmup_steps: int    = 100
     grad_clip: float     = 1.0
 
-    focal_gamma: float             = 2.0   # focal loss: 0 = standard CE, 2 = standard focal
+    focal_gamma: float             = 0.0   # focal loss: 0 = standard CE, 2 = standard focal
     label_smoothing: float         = 0.0   # label smoothing (0 = disabled)
     prediction_loss_weight: float  = 1.0
     surprise_reg_weight: float     = 0.5
