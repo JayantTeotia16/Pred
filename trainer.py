@@ -91,6 +91,7 @@ class PredictionLoss(nn.Module):
         self.w_fut1   = cfg.future_pred_weight_1
         self.w_fut2   = cfg.future_pred_weight_2
         self.w_sig    = cfg.sigreg_loss_weight
+        self.w_jepa   = cfg.jepa_loss_weight
         self.cont_tmp = cfg.contrastive_temperature
         self.min_hist = cfg.min_history_turns
         self.focal_gamma = cfg.focal_gamma
@@ -172,11 +173,14 @@ class PredictionLoss(nn.Module):
             L_cont = torch.tensor(0.0, device=device)
 
         # ── SIGReg — Gaussian regulariser on dispositional state space ────
-        L_sig = outputs.get("sigreg_loss", torch.tensor(0.0, device=device))
+        L_sig  = outputs.get("sigreg_loss", torch.tensor(0.0, device=device))
+
+        # ── JEPA — predict next utterance embedding from s(t) ────────────
+        L_jepa = outputs.get("jepa_loss",   torch.tensor(0.0, device=device))
 
         total = (self.w_pred * L_pred + self.w_surp * L_surp +
                  self.w_post * L_post + self.w_fut1 * L_fut1 + self.w_fut2 * L_fut2 +
-                 self.w_cont * L_cont + self.w_sig * L_sig)
+                 self.w_cont * L_cont + self.w_sig * L_sig + self.w_jepa * L_jepa)
 
         return total, {
             "loss_total":       total.item(),
@@ -187,6 +191,7 @@ class PredictionLoss(nn.Module):
             "loss_surprise":    L_surp.item(),
             "loss_contrastive": L_cont.item(),
             "loss_sigreg":      L_sig.item(),
+            "loss_jepa":        L_jepa.item(),
         }
 
 
@@ -354,6 +359,7 @@ class Trainer:
                 pred=f"{loss_dict['loss_pred']:.4f}",
                 post=f"{loss_dict['loss_post']:.4f}",
                 sig=f"{loss_dict['loss_sigreg']:.4f}",
+                jepa=f"{loss_dict['loss_jepa']:.4f}",
                 cont=f"{loss_dict['loss_contrastive']:.4f}",
                 lr=f"{self.scheduler.get_last_lr()[0]:.2e}",
             )

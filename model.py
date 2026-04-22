@@ -143,6 +143,11 @@ class DispositionalPredictionModel(nn.Module):
         # SIGReg — Gaussian regulariser on dispositional state space
         self.sigreg           = SIGReg(n_projections=256)
 
+        # JEPA predictor: s(t) → ẑ_{t+1} in perturbation space
+        # Trains the dispositional state to predict the semantic content of
+        # the next utterance — a richer signal than emotion labels alone.
+        self.jepa_predictor   = nn.Linear(cfg.dispositional_state_dim, cfg.perturbation_dim)
+
 
     # ── Forward ────────────────────────────────────────────────────────────
 
@@ -205,6 +210,15 @@ class DispositionalPredictionModel(nn.Module):
         # speaker_ids passed for cross-speaker context (SRA)
         disp_states = self.personal_dynamics(all_delta_u, all_spk_ctx, valid_mask, speaker_ids)
 
+        # ── JEPA auxiliary loss — predict next δu from current state ─────────
+        # s(t) predicts δu_{t+1}: the dispositional state must encode enough
+        # about conversational trajectory to anticipate the next utterance.
+        jepa_pred   = self.jepa_predictor(disp_states[:, :-1])     # (B, T-1, pd)
+        jepa_target = all_delta_u[:, 1:].detach()                   # (B, T-1, pd)
+        jepa_mse    = F.mse_loss(jepa_pred, jepa_target, reduction="none").mean(-1)  # (B, T-1)
+        jepa_mask   = valid_mask[:, 1:].float()
+        jepa_loss   = (jepa_mse * jepa_mask).sum() / jepa_mask.sum().clamp(min=1)
+
         # ── Phase 4a: scene states — must be sequential (each step depends on prev) ──
         if self.scene_dynamics is not None:
             scene_list = []
@@ -248,6 +262,7 @@ class DispositionalPredictionModel(nn.Module):
             "dispositional_states": disp_states,                         # (B, T, D)
             "surprise":             surprise,                            # (B, T)
             "sigreg_loss":          self.sigreg(disp_states.view(B * T, -1)),
+            "jepa_loss":            jepa_loss,
             "speaker_contexts":     all_spk_ctx,
             "speaker_ids":          speaker_ids,
             "emotion_ids":          emotion_ids,

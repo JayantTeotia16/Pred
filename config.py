@@ -116,6 +116,7 @@ class TrainingConfig:
     surprise_reg_weight: float     = 0.5
     contrastive_loss_weight: float = 0.01
     sigreg_loss_weight: float      = 0.01   # Gaussian regulariser on dispositional states
+    jepa_loss_weight: float        = 0.5    # JEPA: predict next utterance embedding from s(t)
     contrastive_temperature: float = 0.1
     min_history_turns: int         = 1
 
