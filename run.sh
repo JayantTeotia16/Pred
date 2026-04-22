@@ -146,7 +146,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ── CUDA device ───────────────────────────────────────────────────────────────
-export CUDA_VISIBLE_DEVICES="3"
+#export CUDA_VISIBLE_DEVICES="3"
 
 # ── Python detection ──────────────────────────────────────────────────────────
 PYTHON=""

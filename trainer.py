@@ -493,26 +493,34 @@ class Trainer:
             self._rebuild_optimizer(param_groups, n_epochs)
 
             # ── Epochs in this phase ──────────────────────────────────────
+            do_val = (phase_num == 3)   # only validate in phase 3
             for _ in range(n_epochs):
                 global_epoch += 1
-                self._do_epoch(global_epoch, total, epoch_bar, phase_tag=tag)
+                self._do_epoch(global_epoch, total, epoch_bar, phase_tag=tag, do_val=do_val)
 
         epoch_bar.close()
         print(f"\n=== Done. Best Val F1: {self.best_val_f1:.4f} ===")
 
-    def _do_epoch(self, epoch: int, total_epochs: int, epoch_bar, phase_tag: str):
+    def _do_epoch(self, epoch: int, total_epochs: int, epoch_bar, phase_tag: str,
+                  do_val: bool = True):
         train_m = self.train_epoch(epoch, total_epochs)
-        val_m   = self.evaluate(self.val_loader, "val")
-        wf1     = val_m["val_wf1"]
 
-        postfix = dict(val_f1=f"{wf1:.4f}", best=f"{self.best_val_f1:.4f}",
-                       train_f1=f"{train_m['train_wf1']:.4f}")
+        postfix = dict(train_f1=f"{train_m['train_wf1']:.4f}")
         if phase_tag:
             postfix["phase"] = phase_tag
+
+        if do_val:
+            val_m = self.evaluate(self.val_loader, "val")
+            wf1   = val_m["val_wf1"]
+            postfix.update(val_f1=f"{wf1:.4f}", best=f"{self.best_val_f1:.4f}")
+        else:
+            val_m = {"val_wf1": None}
+            wf1   = None
+
         epoch_bar.set_postfix(**postfix)
         epoch_bar.update(1)
 
-        if wf1 > self.best_val_f1:
+        if wf1 is not None and wf1 > self.best_val_f1:
             self.best_val_f1 = wf1
             self._save_checkpoint(epoch, val_m)
             tqdm.write(f"  *** Epoch {epoch}: new best val F1 {wf1:.4f} → saved ***")
