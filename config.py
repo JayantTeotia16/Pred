@@ -29,7 +29,7 @@ class ModelConfig:
     lora_dropout: float = 0.05
 
     # Dispositional state dim
-    dispositional_state_dim: int = 64
+    dispositional_state_dim: int = 128
 
     # Perturbation: LLaMA hidden states → δu
     perturbation_dim: int = 128
@@ -115,8 +115,8 @@ class TrainingConfig:
     prediction_loss_weight: float  = 1.0
     surprise_reg_weight: float     = 0.5
     contrastive_loss_weight: float = 0.01
-    sigreg_loss_weight: float      = 0.01   # Gaussian regulariser on dispositional states
-    jepa_loss_weight: float        = 0.5    # JEPA: predict next utterance embedding from s(t)
+    sigreg_loss_weight: float      = 0.0    # Gaussian regulariser on dispositional states
+    jepa_loss_weight: float        = 0.0    # JEPA: predict next utterance embedding from s(t)
     contrastive_temperature: float = 0.1
     min_history_turns: int         = 1
 
@@ -132,7 +132,7 @@ class TrainingConfig:
     # ── Staged training ───────────────────────────────────────────────────
     staged_training: bool  = False
     phase1_epochs: int     = 5    # warm-up : LoRA frozen, dispositional only
-    phase2_epochs: int     = 3   # joint   : LoRA + dispositional co-adapt
+    phase2_epochs: int     = 5   # joint   : LoRA + dispositional co-adapt
     phase3_epochs: int     = 10   # refine  : LoRA frozen, dispositional converges
     lora_lr: float         = 3e-5 # separate (smaller) LR for LoRA in phase 2
 
