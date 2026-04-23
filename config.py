@@ -55,7 +55,7 @@ class ModelConfig:
     ])
 
     # Causal Transformer Dynamics (replaces ODE PersonalDynamicsField)
-    transformer_dim: int         = 128
+    transformer_dim: int         = 64
     transformer_heads: int       = 4
     transformer_layers: int      = 2
     max_conversation_length: int = 64   # positional embedding max length
@@ -132,8 +132,8 @@ class TrainingConfig:
     # ── Staged training ───────────────────────────────────────────────────
     staged_training: bool  = False
     phase1_epochs: int     = 5    # warm-up : LoRA frozen, dispositional only
-    phase2_epochs: int     = 5   # joint   : LoRA + dispositional co-adapt
-    phase3_epochs: int     = 10   # refine  : LoRA frozen, dispositional converges
+    phase2_epochs: int     = 3    # joint   : LoRA + dispositional co-adapt
+    phase3_epochs: int     = 5    # refine  : LoRA frozen, dispositional converges
     lora_lr: float         = 3e-5 # separate (smaller) LR for LoRA in phase 2
 
     log_every: int = 50
