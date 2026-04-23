@@ -316,6 +316,13 @@ class PredictionHead(nn.Module):
             nn.Linear(64, num_emotions),
         )
 
+    def set_prior(self, class_counts: torch.Tensor):
+        """Initialise output bias to log-prior so the head starts at the right distribution."""
+        with torch.no_grad():
+            log_prior = torch.log(class_counts.float().clamp(min=1))
+            log_prior = log_prior - log_prior.mean()   # centre so softmax ≈ empirical freq
+            self.net[-1].bias.copy_(log_prior.to(self.net[-1].bias.device))
+
     def forward(self, s: torch.Tensor, scene_s: Optional[torch.Tensor] = None) -> torch.Tensor:
         inp = torch.cat([s, scene_s], dim=-1) if scene_s is not None else s
         return self.net(inp)

@@ -247,6 +247,7 @@ class Trainer:
         self.model.to(self.device)
         self.loss_fn = PredictionLoss(cfg)
         self.scaler  = torch.cuda.amp.GradScaler(enabled=self.device.type == "cuda")
+        self._init_head_priors(train_loader)
 
         os.makedirs(cfg.save_dir, exist_ok=True)
         self.best_val_f1 = 0.0
@@ -260,6 +261,18 @@ class Trainer:
             [{"params": model.get_trainable_params(), "lr": cfg.learning_rate}],
             n_epochs,
         )
+
+    def _init_head_priors(self, loader: DataLoader):
+        """Set prediction head output biases to log class-frequencies from training data."""
+        counts = torch.zeros(self.model.cfg.num_emotions)
+        for batch in loader:
+            labels = batch["emotion_ids"]
+            for c in range(self.model.cfg.num_emotions):
+                counts[c] += (labels == c).sum().item()
+        for head in [self.model.prediction_head, self.model.future_head_1,
+                     self.model.future_head_2, self.model.posterior_head]:
+            head.set_prior(counts)
+        print(f"  Head priors set — counts: {counts.long().tolist()}")
 
     def _to_device(self, batch: Dict) -> Dict:
         return {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
@@ -498,8 +511,9 @@ class Trainer:
             else:
                 self.model.freeze_lora()
                 self._delta_cache = self._build_delta_cache()  # skip 8B for this phase
+                phase_lr = cfg.phase1_lr if phase_num == 1 else cfg.learning_rate
                 param_groups = [
-                    {"params": self.model.get_trainable_params(), "lr": cfg.learning_rate},
+                    {"params": self.model.get_trainable_params(), "lr": phase_lr},
                 ]
 
             self._rebuild_optimizer(param_groups, n_epochs)
