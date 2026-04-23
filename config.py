@@ -29,7 +29,7 @@ class ModelConfig:
     lora_dropout: float = 0.05
 
     # Dispositional state dim
-    dispositional_state_dim: int = 128
+    dispositional_state_dim: int = 64
 
     # Perturbation: LLaMA hidden states → δu
     perturbation_dim: int = 128
