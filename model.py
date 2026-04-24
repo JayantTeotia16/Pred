@@ -30,6 +30,7 @@ from config import ModelConfig
 from dispositional_module import (
     PerturbationEncoder,
     DynamicSpeakerContext,
+    EmotionLabelContext,
     CausalTransformerDynamics,
     FusionGate,
     SceneDynamicsField,
@@ -124,6 +125,7 @@ class DispositionalPredictionModel(nn.Module):
         self.llama_encoder      = LLaMAEncoder(cfg)
         self.perturbation_enc   = PerturbationEncoder(cfg.llama_hidden_size, cfg.perturbation_dim)
         self.speaker_context    = DynamicSpeakerContext(cfg)
+        self.label_context      = EmotionLabelContext(cfg)
         self.personal_dynamics  = CausalTransformerDynamics(cfg)
         self.scene_dynamics     = SceneDynamicsField(cfg) if cfg.use_scene_dynamics else None
 
@@ -191,24 +193,47 @@ class DispositionalPredictionModel(nn.Module):
             del flat_ids, flat_mask, flat_hidden, flat_delta
 
         # ── Phase 2: build speaker contexts turn-by-turn (GRU pass) ──────
-        spk_ctx     = self.speaker_context.init_states(B, MAX_LOCAL_SPEAKERS, device)
-        all_spk_ctx = []
+        spk_ctx      = self.speaker_context.init_states(B, MAX_LOCAL_SPEAKERS, device)
+        label_ctx    = self.label_context.init_states(B, MAX_LOCAL_SPEAKERS, device)
+        # Tracks the last observed emotion per speaker (unknown = num_emotions token)
+        spk_last_emo = torch.full((B, MAX_LOCAL_SPEAKERS), self.cfg.num_emotions,
+                                  dtype=torch.long, device=device)
+        all_spk_ctx      = []
+        all_label_ctx    = []
+        all_prev_spk_emo = []
 
         for t in range(T):
             spk_t   = speaker_ids[:, t]
-            valid_t = valid_mask[:, t].float()
+            valid_t = valid_mask[:, t]
+            spk_idx = spk_t.clamp(max=MAX_LOCAL_SPEAKERS - 1)
+
             all_spk_ctx.append(self.speaker_context.get_context(spk_ctx, spk_t))
+            all_label_ctx.append(self.label_context.get_context(label_ctx, spk_t))
+            all_prev_spk_emo.append(spk_last_emo[torch.arange(B, device=device), spk_idx])
+
             if t < T - 1:
                 spk_ctx_new = self.speaker_context.update(spk_ctx, spk_t, all_delta_u[:, t])
                 spk_ctx = torch.where(
-                    valid_t.bool().unsqueeze(-1).unsqueeze(-1), spk_ctx_new, spk_ctx
+                    valid_t.unsqueeze(-1).unsqueeze(-1), spk_ctx_new, spk_ctx
                 )
+                label_ctx_new = self.label_context.update(label_ctx, spk_t, emotion_ids[:, t])
+                label_ctx = torch.where(
+                    valid_t.unsqueeze(-1).unsqueeze(-1), label_ctx_new, label_ctx
+                )
+                # Update per-speaker last-known emotion (only for valid turns)
+                eid_t   = emotion_ids[:, t]
+                cur_emo = spk_last_emo[torch.arange(B, device=device), spk_idx]
+                new_emo = torch.where(valid_t, eid_t.clamp(min=0), cur_emo)
+                spk_last_emo[torch.arange(B, device=device), spk_idx] = new_emo
 
-        all_spk_ctx = torch.stack(all_spk_ctx, dim=1)   # (B, T, cd)
+        all_spk_ctx      = torch.stack(all_spk_ctx, dim=1)       # (B, T, cd)
+        all_label_ctx    = torch.stack(all_label_ctx, dim=1)     # (B, T, lc)
+        all_prev_spk_emo = torch.stack(all_prev_spk_emo, dim=1)  # (B, T) long
 
         # ── Phase 3: causal transformer → dispositional states ────────────
-        # speaker_ids passed for cross-speaker context (SRA)
-        disp_states = self.personal_dynamics(all_delta_u, all_spk_ctx, valid_mask, speaker_ids)
+        disp_states = self.personal_dynamics(
+            all_delta_u, all_spk_ctx, all_label_ctx, all_prev_spk_emo, valid_mask, speaker_ids
+        )
 
         # ── JEPA auxiliary loss — predict next δu from current state ─────────
         # s(t) predicts δu_{t+1}: the dispositional state must encode enough

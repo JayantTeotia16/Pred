@@ -48,6 +48,10 @@ class ModelConfig:
     use_scene_dynamics: bool = True
     scene_state_dim: int     = 32
 
+    # Emotion label conditioning (options 1 & 2)
+    emotion_label_embed_dim: int = 16   # embedding dim for past emotion labels
+    label_context_dim: int       = 32   # hidden dim of per-speaker emotion-label GRU
+
     # Emotion classes — set from DataConfig at runtime
     num_emotions: int = 7
     emotion_labels: List[str] = field(default_factory=lambda: [

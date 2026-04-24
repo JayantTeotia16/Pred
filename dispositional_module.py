@@ -52,6 +52,113 @@ class SIGReg(nn.Module):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Emotion Label Context  —  per-speaker label-history GRU
+# ──────────────────────────────────────────────────────────────────────────────
+
+class EmotionLabelContext(nn.Module):
+    """
+    Per-speaker GRU that tracks emotion label history — parallel to the text GRU.
+    Operates on observed emotion labels (causally valid: labels 0..t-1 are known).
+    Complements DynamicSpeakerContext by capturing what the speaker FELT, not just
+    what they said.
+    """
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.context_dim = cfg.label_context_dim
+        self.n_emotions  = cfg.num_emotions
+        self.embed = nn.Embedding(cfg.num_emotions + 1, cfg.emotion_label_embed_dim)  # +1 = unknown
+        self.gru   = nn.GRUCell(cfg.emotion_label_embed_dim, cfg.label_context_dim)
+        nn.init.orthogonal_(self.gru.weight_ih)
+        nn.init.orthogonal_(self.gru.weight_hh)
+
+    def init_states(self, B: int, max_speakers: int, device: torch.device) -> torch.Tensor:
+        return torch.zeros(B, max_speakers, self.context_dim, device=device)
+
+    def get_context(self, states: torch.Tensor, speaker_ids: torch.Tensor) -> torch.Tensor:
+        B   = states.shape[0]
+        idx = speaker_ids.clamp(max=states.shape[1] - 1)
+        return states[torch.arange(B, device=states.device), idx]
+
+    def update(self, states: torch.Tensor, speaker_ids: torch.Tensor,
+               emotion_ids: torch.Tensor) -> torch.Tensor:
+        B, S, _ = states.shape
+        idx      = speaker_ids.clamp(max=S - 1)
+        safe_emo = torch.where(emotion_ids >= 0, emotion_ids,
+                               torch.full_like(emotion_ids, self.n_emotions))
+        emb   = self.embed(safe_emo)
+        h_old = states[torch.arange(B, device=states.device), idx]
+        h_new = self.gru(emb.float(), h_old.float())
+        states_new = states.clone()
+        states_new[torch.arange(B, device=states.device), idx] = h_new.to(states.dtype)
+        return states_new
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cross-Speaker Attention  —  learned upgrade over mean-pooling SRA
+# ──────────────────────────────────────────────────────────────────────────────
+
+class CrossSpeakerAttention(nn.Module):
+    """
+    At turn t, the active speaker attends over OTHER speakers' past δu (turns 0..t-1).
+    Replaces the naive causal mean of SRA with a learned multi-head attention,
+    letting the model weight which other speakers and which past turns matter most.
+
+    Masking: strictly causal (no attending to t or later) + same-speaker blocked.
+    Rows with no valid keys (no other speaker has spoken yet) return zeros.
+    """
+
+    def __init__(self, perturbation_dim: int, num_heads: int = 2):
+        super().__init__()
+        assert perturbation_dim % num_heads == 0
+        self.n_heads  = num_heads
+        self.head_dim = perturbation_dim // num_heads
+        self.scale    = self.head_dim ** -0.5
+        self.q_proj   = nn.Linear(perturbation_dim, perturbation_dim, bias=False)
+        self.k_proj   = nn.Linear(perturbation_dim, perturbation_dim, bias=False)
+        self.v_proj   = nn.Linear(perturbation_dim, perturbation_dim, bias=False)
+        self.out_proj = nn.Linear(perturbation_dim, perturbation_dim)
+
+    def forward(
+        self,
+        delta_u:     torch.Tensor,  # (B, T, pd)
+        speaker_ids: torch.Tensor,  # (B, T)
+        valid_mask:  torch.Tensor,  # (B, T) bool
+    ) -> torch.Tensor:              # (B, T, pd)
+        B, T, pd = delta_u.shape
+        device   = delta_u.device
+        H, D     = self.n_heads, self.head_dim
+
+        Q = self.q_proj(delta_u).view(B, T, H, D).transpose(1, 2)  # (B, H, T, D)
+        K = self.k_proj(delta_u).view(B, T, H, D).transpose(1, 2)
+        V = self.v_proj(delta_u).view(B, T, H, D).transpose(1, 2)
+
+        scores = torch.matmul(Q, K.transpose(-1, -2)) * self.scale  # (B, H, T, T)
+
+        # Strict causal: query t cannot see key t or later
+        causal  = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=0)
+        # Same speaker: block self-attention across turns of the same speaker
+        same_spk = speaker_ids.unsqueeze(2) == speaker_ids.unsqueeze(1)           # (B, T, T)
+        # Invalid keys (padding)
+        inv_key  = ~valid_mask.unsqueeze(1).expand(B, T, T)                       # (B, T, T)
+
+        mask = (causal.unsqueeze(0) | same_spk | inv_key).unsqueeze(1)            # (B, 1, T, T)
+        mask = mask.expand(B, H, T, T)
+
+        scores = scores.masked_fill(mask, float("-inf"))
+
+        # Rows with no valid keys → zero output (avoid NaN)
+        all_masked = mask.all(dim=-1, keepdim=True)
+        scores     = scores.masked_fill(all_masked, 0.0)
+        weights    = torch.softmax(scores, dim=-1)
+        weights    = weights.masked_fill(all_masked, 0.0)
+
+        out = torch.matmul(weights, V)                              # (B, H, T, D)
+        out = out.transpose(1, 2).contiguous().view(B, T, pd)
+        return self.out_proj(out)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Dynamic Speaker Context
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -127,15 +234,15 @@ class PerturbationEncoder(nn.Module):
 
 class CausalTransformerDynamics(nn.Module):
     """
-    Causally-masked transformer over per-turn (δu, c, cross_ctx) features.
+    Causally-masked transformer over per-turn (δu, c, cross_ctx, emo_embed, label_ctx).
 
-    Speaker-Relational Attention (SRA):
-        cross_ctx[t] = causal mean of δu from speakers OTHER than the current
-        speaker at turn t. This gives each turn awareness of how other
-        speakers have been behaving — interpersonal emotional dynamics —
-        without modifying the attention mechanism itself.
+    Upgrades over the original:
+      - CrossSpeakerAttention replaces mean-pooling SRA
+      - Past emotion label embedding conditions each turn on the active speaker's
+        last known emotion (causally valid: labels 0..t-1 are observed)
+      - EmotionLabelContext (label GRU) output is concatenated as additional context
 
-    Input per turn: cat(δu_t, c_t, cross_ctx_t)  →  project to transformer_dim
+    Input per turn: cat(δu_t, spk_ctx_t, cross_ctx_t, emo_embed_t, label_ctx_t)
     Output: dispositional states (B, T, state_dim), strictly causal.
     """
 
@@ -143,8 +250,13 @@ class CausalTransformerDynamics(nn.Module):
         super().__init__()
         d = cfg.transformer_dim
         self.n_heads = cfg.transformer_heads
-        # Input: δu + speaker_ctx + cross-speaker δu
-        self.input_proj = nn.Linear(cfg.perturbation_dim * 2 + cfg.speaker_context_dim, d)
+
+        self.cross_spk_attn = CrossSpeakerAttention(cfg.perturbation_dim, num_heads=2)
+        self.emotion_embed  = nn.Embedding(cfg.num_emotions + 1, cfg.emotion_label_embed_dim)
+
+        in_dim = (cfg.perturbation_dim * 2 + cfg.speaker_context_dim
+                  + cfg.emotion_label_embed_dim + cfg.label_context_dim)
+        self.input_proj = nn.Linear(in_dim, d)
         self.pos_embed  = nn.Embedding(cfg.max_conversation_length, d)
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -164,67 +276,23 @@ class CausalTransformerDynamics(nn.Module):
 
         self.initial_state = nn.Parameter(torch.zeros(cfg.dispositional_state_dim))
 
-    def _cross_speaker_ctx(
-        self,
-        all_delta_u:  torch.Tensor,   # (B, T, pd)
-        speaker_ids:  torch.Tensor,   # (B, T)
-        valid_mask:   torch.Tensor,   # (B, T) bool
-    ) -> torch.Tensor:
-        """
-        For each turn t, compute the causal mean of δu from OTHER speakers
-        at positions 0..t-1. Fully vectorised — no Python loop.
-
-        Strategy: exclusive_cumsum(all δu) − exclusive_cumsum(same-speaker δu)
-        """
-        B, T, pd = all_delta_u.shape
-        device   = all_delta_u.device
-        valid_f  = valid_mask.float()                         # (B, T)
-        weighted = all_delta_u * valid_f.unsqueeze(-1)        # (B, T, pd)
-
-        # Exclusive total cumulative sum: turn t sees sum of 0..t-1
-        cum_all     = torch.zeros(B, T, pd, device=device)
-        cum_all[:, 1:] = torch.cumsum(weighted, dim=1)[:, :-1]
-
-        cnt_all     = torch.zeros(B, T, device=device)
-        cnt_all[:, 1:] = torch.cumsum(valid_f, dim=1)[:, :-1]
-
-        # Per-speaker exclusive cumsum via one-hot scatter
-        S        = min(int(speaker_ids.max().item()) + 1, 16)   # cap at MAX_LOCAL_SPEAKERS
-        spk_long = speaker_ids.long().clamp(max=S - 1)
-        onehot   = torch.zeros(B, T, S, device=device)
-        onehot.scatter_(2, spk_long.unsqueeze(-1), 1.0)         # (B, T, S)
-
-        per_spk_w   = weighted.unsqueeze(2) * onehot.unsqueeze(-1)   # (B, T, S, pd)
-        per_spk_cum = torch.zeros(B, T, S, pd, device=device)
-        per_spk_cum[:, 1:] = torch.cumsum(per_spk_w, dim=1)[:, :-1]
-
-        spk_valid   = onehot * valid_f.unsqueeze(-1)                  # (B, T, S)
-        per_spk_cnt = torch.zeros(B, T, S, device=device)
-        per_spk_cnt[:, 1:] = torch.cumsum(spk_valid, dim=1)[:, :-1]
-
-        # Gather same-speaker cumulative for each turn
-        idx_pd   = spk_long.unsqueeze(-1).unsqueeze(-1).expand(B, T, 1, pd)
-        same_cum = per_spk_cum.gather(2, idx_pd).squeeze(2)           # (B, T, pd)
-        idx_s    = spk_long.unsqueeze(-1)
-        same_cnt = per_spk_cnt.gather(2, idx_s).squeeze(-1)           # (B, T)
-
-        cross_cum = cum_all - same_cum                                  # (B, T, pd)
-        cross_cnt = (cnt_all - same_cnt).unsqueeze(-1).clamp(min=1e-9) # (B, T, 1)
-        return cross_cum / cross_cnt                                    # (B, T, pd)
-
     def forward(
         self,
         all_delta_u:     torch.Tensor,   # (B, T, perturbation_dim)
         all_speaker_ctx: torch.Tensor,   # (B, T, speaker_context_dim)
+        all_label_ctx:   torch.Tensor,   # (B, T, label_context_dim)
+        prev_spk_emo:    torch.Tensor,   # (B, T) long — active speaker's last emotion
         valid_mask:      torch.Tensor,   # (B, T) bool
         speaker_ids:     torch.Tensor,   # (B, T)
     ) -> torch.Tensor:
         B, T, _ = all_delta_u.shape
         device   = all_delta_u.device
 
-        cross_ctx = self._cross_speaker_ctx(all_delta_u, speaker_ids, valid_mask)
+        cross_ctx  = self.cross_spk_attn(all_delta_u, speaker_ids, valid_mask)  # (B, T, pd)
+        emo_embeds = self.emotion_embed(prev_spk_emo)                            # (B, T, eld)
 
-        x = torch.cat([all_delta_u, all_speaker_ctx, cross_ctx], dim=-1)
+        x = torch.cat([all_delta_u, all_speaker_ctx, cross_ctx,
+                        emo_embeds, all_label_ctx], dim=-1)
         x = self.input_proj(x)
         x = x + self.pos_embed(torch.arange(T, device=device))
 
