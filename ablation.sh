@@ -201,10 +201,14 @@ nw = max(len(r['name']) for r in rows)
 print(f"  {'Name':<{nw}}  {'Prior F1':>10}  {'Post F1':>10}  {'Gap':>8}")
 print(f"  {'-'*nw}  {'-'*10}  {'-'*10}  {'-'*8}")
 ref = next((r for r in rows if r['name'] == 'full_model'), None)
+def parseable(v):
+    try: float(v); return True
+    except (ValueError, TypeError): return False
 for r in rows:
     prior = r['test_prior_f1']
     delta = ''
-    if ref and prior != 'N/A' and ref['test_prior_f1'] != 'N/A' and r['name'] != 'full_model':
+    if (ref and r['name'] != 'full_model'
+            and parseable(prior) and parseable(ref['test_prior_f1'])):
         diff = float(prior) - float(ref['test_prior_f1'])
         delta = f"  ({diff:+.4f})"
     print(
