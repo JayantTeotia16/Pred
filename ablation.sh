@@ -83,12 +83,19 @@ run_ablation() {
   log "Description : $desc"
   mkdir -p "$out_dir"
 
+  local exit_code=0
   $PYTHON ablation_runner.py \
     --name       "$name"       \
     --output_dir "$out_dir"    \
     --device     "$DEVICE"     \
     --batch_size "$BATCH_SIZE" \
-    "$@" 2>&1 | tee "$log_file"
+    "$@" 2>&1 | tee "$log_file" || exit_code=$?
+
+  if [[ $exit_code -ne 0 ]]; then
+    echo -e "\033[0;31m[FAILED]\033[0m $name exited with code $exit_code — logging FAILED and continuing"
+    printf '"%s","%s",FAILED,FAILED,FAILED\n' "$name" "$desc" >> "$RESULTS_CSV"
+    return 0
+  fi
 
   local prior_f1 post_f1 gap
   read -r prior_f1 post_f1 gap <<< "$(parse_test_metrics "$log_file")"

@@ -264,6 +264,8 @@ class Trainer:
 
     def _init_head_priors(self, loader: DataLoader):
         """Set prediction head output biases to log class-frequencies from training data."""
+        if not hasattr(self.model, "prediction_head"):
+            return  # baseline model has no dispositional heads
         counts = torch.zeros(self.model.cfg.num_emotions)
         for batch in loader:
             labels = batch["emotion_ids"]
