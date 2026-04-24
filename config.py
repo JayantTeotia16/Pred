@@ -59,8 +59,8 @@ class ModelConfig:
     ])
 
     # Causal Transformer Dynamics (replaces ODE PersonalDynamicsField)
-    transformer_dim: int         = 128
-    transformer_heads: int       = 8
+    transformer_dim: int         = 64
+    transformer_heads: int       = 4
     transformer_layers: int      = 2
     max_conversation_length: int = 64   # positional embedding max length
 
