@@ -2,14 +2,15 @@
 dispositional_module.py — Universal dispositional module.
 
 Architecture:
-    PerturbationEncoder        LLaMA hidden → δu  (last-token pooling)
-    DynamicSpeakerContext      per-speaker GRU → speaker context c ∈ ℝ^D
-    CausalTransformerDynamics  causally-masked transformer over
-                               (δu, c, cross_ctx) history → s(t)
-                               cross_ctx = mean δu from OTHER speakers (SRA)
-    FusionGate                 s_prior(t) + δu_t → s_posterior(t)
-    SceneDynamicsField         shared scene-level ODE (co-regulation)
-    PredictionHead             s(t) [+ scene_s] → emotion logits
+    PerturbationEncoder              LLaMA hidden → δu  (last-token pooling)
+    DynamicSpeakerContext            per-speaker GRU → speaker context c ∈ ℝ^D
+    PredictiveCodingEmotionModule    per-speaker belief state updated via
+                                     precision-weighted prediction error.
+                                     Outputs prior + posterior beliefs —
+                                     prior/posterior split is architectural,
+                                     not a loss design choice.
+    SceneDynamicsField               shared scene-level ODE (co-regulation)
+    PredictionHead                   b(t) [+ scene_s] → emotion logits
 """
 
 import torch
@@ -156,6 +157,133 @@ class CrossSpeakerAttention(nn.Module):
         out = torch.matmul(weights, V)                              # (B, H, T, D)
         out = out.transpose(1, 2).contiguous().view(B, T, pd)
         return self.out_proj(out)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Predictive Coding Emotion Module  —  replaces CausalTransformerDynamics + FusionGate
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PredictiveCodingEmotionModule(nn.Module):
+    """
+    Per-speaker belief state updated via precision-weighted prediction error.
+
+    At each turn t for active speaker s:
+      1. Prior:      b_s(t)  is the belief BEFORE utterance t  → prior prediction
+      2. Generate:   pred_δu = G(b_s(t))                       → what we expect them to say
+      3. Error:      ε_t     = actual_δu_t − pred_δu           → prediction error
+      4. Precision:  π_t     = σ(P(b_s(t)))                    → per-dim confidence
+      5. Posterior:  b_post  = b_s(t) + π_t ⊙ W_e ε_t         → belief after correction
+      6. Transition: b_s(t+1) = GRU(b_post, spk_ctx, lbl_ctx, emo_emb, cross_ctx)
+
+    The prior/posterior split is an architectural property, not a loss design choice.
+    Fully dataset-agnostic: belief states are indexed by local speaker slot (0..S-1),
+    no global speaker vocabulary required.
+    """
+
+    MAX_LOCAL_SPEAKERS = 16
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        D   = cfg.dispositional_state_dim
+        pd  = cfg.perturbation_dim
+        cd  = cfg.speaker_context_dim
+        lc  = cfg.label_context_dim
+        eld = cfg.emotion_label_embed_dim
+
+        # Cross-speaker attention — enriches transition with other speakers' signals
+        self.cross_spk_attn = CrossSpeakerAttention(pd, num_heads=2)
+
+        # Past emotion embedding for the active speaker
+        self.emotion_embed = nn.Embedding(cfg.num_emotions + 1, eld)
+
+        # Generative model: belief → predicted utterance perturbation
+        self.generator = nn.Sequential(
+            nn.Linear(D, D),
+            nn.GELU(),
+            nn.Linear(D, pd),
+        )
+
+        # Error projection: δu space → belief space
+        self.error_proj = nn.Linear(pd, D)
+
+        # Precision network: per-dim confidence — how much to trust the prediction
+        self.precision_net = nn.Sequential(
+            nn.Linear(D, D),
+            nn.Sigmoid(),
+        )
+
+        # Transition GRU: posterior belief + context → next prior belief
+        self.transition = nn.GRUCell(D + cd + lc + eld + pd, D)
+        nn.init.orthogonal_(self.transition.weight_ih)
+        nn.init.orthogonal_(self.transition.weight_hh)
+
+        # Learnable global initial belief (same starting point for all speakers)
+        self.initial_belief = nn.Parameter(torch.zeros(D))
+        self.belief_dim = D
+
+    def forward(
+        self,
+        all_delta_u:     torch.Tensor,   # (B, T, pd)
+        all_speaker_ctx: torch.Tensor,   # (B, T, cd)
+        all_label_ctx:   torch.Tensor,   # (B, T, lc)
+        prev_spk_emo:    torch.Tensor,   # (B, T) long — active speaker's last known emotion
+        valid_mask:      torch.Tensor,   # (B, T) bool
+        speaker_ids:     torch.Tensor,   # (B, T)
+    ):
+        B, T, _  = all_delta_u.shape
+        D, S     = self.belief_dim, self.MAX_LOCAL_SPEAKERS
+        device   = all_delta_u.device
+
+        # Pre-compute cross-speaker attention for all turns (batched, fast)
+        all_cross_ctx = self.cross_spk_attn(all_delta_u, speaker_ids, valid_mask)  # (B, T, pd)
+
+        # Per-speaker belief states — each speaker starts from the same learned prior
+        b_states = self.initial_belief.view(1, 1, D).expand(B, S, D).clone()
+
+        prior_list, post_list, error_list = [], [], []
+
+        for t in range(T):
+            spk_idx   = speaker_ids[:, t].clamp(max=S - 1)
+            valid_t   = valid_mask[:, t]
+            batch_idx = torch.arange(B, device=device)
+
+            # ── 1. Prior belief ──────────────────────────────────────────────
+            b_prior = b_states[batch_idx, spk_idx]        # (B, D)
+            prior_list.append(b_prior)
+
+            # ── 2 & 3. Generate prediction → compute error ───────────────────
+            pred_du   = self.generator(b_prior)           # (B, pd)
+            actual_du = all_delta_u[:, t]                 # (B, pd)
+            error     = actual_du - pred_du               # (B, pd)
+            error_list.append(error)
+
+            # ── 4 & 5. Precision-weighted posterior update ────────────────────
+            precision = self.precision_net(b_prior)                         # (B, D)
+            b_post    = b_prior + precision * self.error_proj(error.float())  # (B, D)
+            post_list.append(b_post)
+
+            # ── 6. Transition to next belief for this speaker ────────────────
+            emo_emb   = self.emotion_embed(prev_spk_emo[:, t])  # (B, eld)
+            cross_ctx = all_cross_ctx[:, t]                      # (B, pd)
+            trans_in  = torch.cat(
+                [b_post, all_speaker_ctx[:, t], all_label_ctx[:, t], emo_emb, cross_ctx],
+                dim=-1,
+            )
+            b_next = self.transition(trans_in.float(), b_post.float())  # (B, D)
+
+            # Write back only the active speaker, only for valid turns
+            b_states_new = b_states.clone()
+            b_states_new[batch_idx, spk_idx] = torch.where(
+                valid_t.unsqueeze(-1),
+                b_next.to(b_states.dtype),
+                b_prior.to(b_states.dtype),
+            )
+            b_states = b_states_new
+
+        prior_beliefs = torch.stack(prior_list, dim=1)   # (B, T, D)
+        post_beliefs  = torch.stack(post_list,  dim=1)   # (B, T, D)
+        errors        = torch.stack(error_list, dim=1)   # (B, T, pd)
+        return prior_beliefs, post_beliefs, errors
 
 
 # ──────────────────────────────────────────────────────────────────────────────
