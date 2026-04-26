@@ -62,6 +62,8 @@ def parse_args():
     p.add_argument("--posterior_loss_weight",  type=float, default=None)
     p.add_argument("--surprise_reg_weight",    type=float, default=None)
     p.add_argument("--contrastive_loss_weight", type=float, default=None)
+    p.add_argument("--focal_gamma",            type=float, default=None)
+    p.add_argument("--label_smoothing",        type=float, default=None)
 
     return p.parse_args()
 
@@ -103,6 +105,10 @@ def main():
         cfg.training.surprise_reg_weight = args.surprise_reg_weight
     if args.contrastive_loss_weight is not None:
         cfg.training.contrastive_loss_weight = args.contrastive_loss_weight
+    if args.focal_gamma is not None:
+        cfg.training.focal_gamma = args.focal_gamma
+    if args.label_smoothing is not None:
+        cfg.training.label_smoothing = args.label_smoothing
 
     set_seed(cfg.seed)
 
