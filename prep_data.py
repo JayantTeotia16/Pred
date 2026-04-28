@@ -74,15 +74,24 @@ def prep_iemocap(out_dir: str):
     from datasets import load_dataset
     import json
 
-    # Try a publicly available version
-    HF_NAME   = "Zahra99/iemocap_text"
-    HF_CONFIG = None
+    # Sources to try in order
+    SOURCES = [
+        ("eusip/silicone", "iemocap"),   # same hub as MELD/DailyDialog, no login needed
+        ("Zahra99/iemocap_text", None),
+    ]
 
-    print(f"Attempting to download IEMOCAP from {HF_NAME} ...")
-    try:
-        ds = load_dataset(HF_NAME, trust_remote_code=True)
-    except Exception as e:
-        print(f"\n[WARN] Could not download IEMOCAP: {e}")
+    ds = None
+    for hf_name, hf_cfg in SOURCES:
+        try:
+            print(f"Attempting IEMOCAP from {hf_name} (config={hf_cfg}) ...")
+            ds = load_dataset(hf_name, hf_cfg, trust_remote_code=True)
+            print(f"  Success: {hf_name}")
+            break
+        except Exception as e:
+            print(f"  Failed: {e}")
+
+    if ds is None:
+        print("\n[WARN] Could not download IEMOCAP from any source.")
         print("IEMOCAP is a gated dataset. Options:")
         print("  1. Run: huggingface-cli login  then retry")
         print("  2. Download manually and convert to CSV with columns:")
