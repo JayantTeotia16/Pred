@@ -16,13 +16,11 @@ cd "$SCRIPT_DIR"
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEVICE="cuda"
 BATCH_SIZE=8
-SKIP_IEMOCAP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --device)       DEVICE="$2";      shift 2 ;;
-    --batch_size)   BATCH_SIZE="$2";  shift 2 ;;
-    --skip_iemocap) SKIP_IEMOCAP=1;   shift   ;;
+    --device)     DEVICE="$2";     shift 2 ;;
+    --batch_size) BATCH_SIZE="$2"; shift 2 ;;
     *) echo "[ERROR] Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -91,27 +89,43 @@ ensure_csv() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. IEMOCAP  (optional — skip with --skip_iemocap)
+# 1. EmoryNLP  (GitHub — dispositional labels, best match for our task)
+# ─────────────────────────────────────────────────────────────────────────────
+EMORYNLP_DIR="./data/emorynlp"
+ensure_csv "emorynlp" "$EMORYNLP_DIR"
+
+run_dataset "emorynlp" "EmoryNLP" \
+  --local_data      "$EMORYNLP_DIR" \
+  --utterance_col   "Utterance"     \
+  --speaker_col     "Speaker"       \
+  --emotion_col     "Emotion"       \
+  --dialogue_id_col "Dialogue_ID"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. IEMOCAP  (Berzerker/IEMOCAP — txt files, no auth needed)
 # ─────────────────────────────────────────────────────────────────────────────
 IEMOCAP_DIR="./data/iemocap"
-if [[ $SKIP_IEMOCAP -eq 1 ]]; then
-  warn "Skipping IEMOCAP (--skip_iemocap set)"
-elif [[ ! -f "$IEMOCAP_DIR/train.csv" ]]; then
-  log "Attempting IEMOCAP download..."
-  $PYTHON prep_data.py --dataset iemocap --out_dir "$IEMOCAP_DIR" || {
-    warn "IEMOCAP download failed — skipping. Run 'huggingface-cli login' and retry."
-    SKIP_IEMOCAP=1
-  }
-fi
+ensure_csv "iemocap" "$IEMOCAP_DIR"
 
-if [[ $SKIP_IEMOCAP -eq 0 && -f "$IEMOCAP_DIR/train.csv" ]]; then
-  run_dataset "iemocap" "IEMOCAP" \
-    --local_data      "$IEMOCAP_DIR" \
-    --utterance_col   "Utterance"    \
-    --speaker_col     "Speaker"      \
-    --emotion_col     "Emotion"      \
-    --dialogue_id_col "Dialogue_ID"
-fi
+run_dataset "iemocap" "IEMOCAP" \
+  --local_data      "$IEMOCAP_DIR" \
+  --utterance_col   "Utterance"    \
+  --speaker_col     "Speaker"      \
+  --emotion_col     "Emotion"      \
+  --dialogue_id_col "Dialogue_ID"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. MultiDialog  (IVLLab/MultiDialog — public, 7 emotions, 151k utterances)
+# ─────────────────────────────────────────────────────────────────────────────
+MULTIDIALOG_DIR="./data/multidialog"
+ensure_csv "multidialog" "$MULTIDIALOG_DIR"
+
+run_dataset "multidialog" "MultiDialog" \
+  --local_data      "$MULTIDIALOG_DIR" \
+  --utterance_col   "Utterance"        \
+  --speaker_col     "Speaker"          \
+  --emotion_col     "Emotion"          \
+  --dialogue_id_col "Dialogue_ID"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. DailyDialog  (via eusip/silicone dyda_e — avoids broken daily_dialog zip)
@@ -142,7 +156,7 @@ import os, json, csv, sys
 ckpt_base   = sys.argv[1]
 results_csv = sys.argv[2]
 
-DATASET_NAMES = {"iemocap": "IEMOCAP", "dailydialog": "DailyDialog", "meld": "MELD"}
+DATASET_NAMES = {"emorynlp": "EmoryNLP", "iemocap": "IEMOCAP", "multidialog": "MultiDialog", "dailydialog": "DailyDialog", "meld": "MELD"}
 
 summary_rows  = []   # one row per dataset (overall metrics)
 emotion_rows  = []   # one row per dataset × emotion
