@@ -1,6 +1,9 @@
 """
 prep_data.py — Preprocess HuggingFace datasets into row-per-utterance CSVs.
 
+Emotion labels are stored as original dataset strings — no mapping to a
+canonical cross-dataset vocabulary. Each dataset keeps its own label space.
+
 Usage:
     python prep_data.py --dataset dailydialog --out_dir ./data/dailydialog
     python prep_data.py --dataset iemocap     --out_dir ./data/iemocap
@@ -12,24 +15,15 @@ import csv
 
 
 # ── DailyDialog ───────────────────────────────────────────────────────────────
-# Emotions: 0=no_emotion→neutral, 1=anger, 2=disgust, 3=fear,
-#           4=happiness→joy, 5=sadness, 6=surprise
-CANONICAL_EMOTIONS = ["neutral", "surprise", "fear", "joy", "sadness", "disgust", "anger"]
-EMOTION2ID = {e: i for i, e in enumerate(CANONICAL_EMOTIONS)}
-
+# Original labels: 0=no_emotion, 1=anger, 2=disgust, 3=fear,
+#                  4=happiness, 5=sadness, 6=surprise
 DAILYDIALOG_INT_TO_NAME = {
-    0: "neutral", 1: "anger", 2: "disgust", 3: "fear",
-    4: "joy",     5: "sadness", 6: "surprise",
+    0: "no_emotion", 1: "anger", 2: "disgust", 3: "fear",
+    4: "happiness",  5: "sadness", 6: "surprise",
 }
 
 
 def prep_dailydialog(out_dir: str):
-    """
-    Uses eusip/silicone dyda_e — DailyDialog already in row-per-utterance format,
-    same schema as MELD. Avoids the broken daily_dialog HF dataset zip handling.
-    Emotions: 0=no_emotion(neutral),1=anger,2=disgust,3=fear,4=happiness(joy),
-              5=sadness,6=surprise
-    """
     from datasets import load_dataset
     import json
 
@@ -42,12 +36,14 @@ def prep_dailydialog(out_dir: str):
                           split=hf_split, trust_remote_code=True)
         rows = []
         for sample in ds:
+            raw_int = sample.get("Emotion", sample.get("emotion", 0))
+            emo_name = DAILYDIALOG_INT_TO_NAME.get(int(raw_int), "no_emotion")
             rows.append({
                 "Dialogue_ID":  sample.get("Dialogue_ID", sample.get("dialogue_id", 0)),
                 "Utterance_ID": sample.get("Utterance_ID", sample.get("utterance_id", 0)),
                 "Utterance":    str(sample.get("Utterance",  sample.get("utterance", ""))).strip(),
                 "Speaker":      str(sample.get("Speaker",    sample.get("speaker", "spk_0"))).strip(),
-                "Emotion":      sample.get("Emotion", sample.get("emotion", 0)),
+                "Emotion":      emo_name,
             })
 
         out_path = os.path.join(out_dir, f"{split_name}.csv")
@@ -66,20 +62,14 @@ def prep_dailydialog(out_dir: str):
 
 
 # ── IEMOCAP ───────────────────────────────────────────────────────────────────
-# Tries the public HuggingFace mirror; falls back with clear instructions.
-IEMOCAP_INT_TO_NAME = {
-    0: "neutral", 1: "joy", 2: "sadness",
-    3: "anger",   4: "fear", 5: "disgust", 6: "surprise",
-}
-
-
+# Original IEMOCAP short-code → full name mapping (no remapping to other datasets)
 IEMOCAP_EMO_MAP = {
     "neu": "neutral",
     "ang": "anger",
     "sad": "sadness",
-    "hap": "joy",
-    "exc": "joy",       # excited → joy (standard IEMOCAP merge)
-    "fru": "disgust",   # frustration → closest canonical class
+    "hap": "happiness",
+    "exc": "excitement",
+    "fru": "frustration",
     "sur": "surprise",
     "fea": "fear",
     "dis": "disgust",
@@ -92,7 +82,7 @@ def _parse_iemocap_txt(path: str):
     Each line: ID<TAB>emotion<TAB>utterance
     ID format: Ses01F_impro01_F000
       → dialogue_id = Ses01F_impro01
-      → speaker     = F or M  (second-to-last segment letter)
+      → speaker     = F or M
       → utt_id      = 000
     """
     rows = []
@@ -102,24 +92,22 @@ def _parse_iemocap_txt(path: str):
             if len(parts) < 3:
                 continue
             utt_id_full, raw_emo, utterance = parts[0], parts[1].strip(), parts[2].strip()
-            # Parse ID: e.g. Ses01F_impro01_F000
-            segments = utt_id_full.rsplit("_", 1)   # ['Ses01F_impro01', 'F000']
+            segments = utt_id_full.rsplit("_", 1)
             if len(segments) != 2:
                 continue
-            dial_id   = segments[0]                  # Ses01F_impro01
-            spk_utt   = segments[1]                  # F000 or M000
-            speaker   = spk_utt[0]                   # F or M
-            utt_num   = spk_utt[1:]                  # 000
+            dial_id = segments[0]
+            spk_utt = segments[1]
+            speaker = spk_utt[0]
+            utt_num = spk_utt[1:]
 
-            emo_name  = IEMOCAP_EMO_MAP.get(raw_emo.lower(), "neutral")
-            emo_int   = EMOTION2ID.get(emo_name, 0)
+            emo_name = IEMOCAP_EMO_MAP.get(raw_emo.lower(), raw_emo.lower())
 
             rows.append({
                 "Dialogue_ID":  dial_id,
                 "Utterance_ID": utt_num,
                 "Utterance":    utterance,
                 "Speaker":      speaker,
-                "Emotion":      emo_int,
+                "Emotion":      emo_name,
             })
     return rows
 
@@ -130,7 +118,6 @@ def prep_iemocap(out_dir: str):
     BASE_URL = "https://huggingface.co/datasets/Berzerker/IEMOCAP/resolve/main"
     os.makedirs(out_dir, exist_ok=True)
 
-    # Download train.txt and test.txt (valid.txt is empty)
     for fname in ["train.txt", "test.txt"]:
         dest = os.path.join(out_dir, fname)
         if not os.path.exists(dest):
@@ -141,7 +128,6 @@ def prep_iemocap(out_dir: str):
     all_train = _parse_iemocap_txt(os.path.join(out_dir, "train.txt"))
     all_test  = _parse_iemocap_txt(os.path.join(out_dir, "test.txt"))
 
-    # Split train → 90% train / 10% val by dialogue (keep conversations intact)
     dial_ids  = list(dict.fromkeys(r["Dialogue_ID"] for r in all_train))
     cut       = int(len(dial_ids) * 0.9)
     train_ids = set(dial_ids[:cut])
@@ -169,17 +155,7 @@ def prep_iemocap(out_dir: str):
 
 
 # ── MultiDialog ───────────────────────────────────────────────────────────────
-# Emotions: neutral, happy, fear, angry, disgusting→disgust, surprising→surprise, sad→sadness
-MULTIDIALOG_EMO_MAP = {
-    "neutral":    "neutral",
-    "happy":      "joy",
-    "fear":       "fear",
-    "angry":      "anger",
-    "disgusting": "disgust",
-    "surprising": "surprise",
-    "sad":        "sadness",
-}
-
+# Original labels: neutral, happy, fear, angry, disgusting, surprising, sad
 
 def prep_multidialog(out_dir: str):
     from datasets import load_dataset
@@ -188,28 +164,23 @@ def prep_multidialog(out_dir: str):
     print("Downloading IVLLab/MultiDialog ...")
     os.makedirs(out_dir, exist_ok=True)
 
-    # MultiDialog split names
     split_map = {
         "train": "train",
-        "val":   "valid_freq",   # use frequent-emotion val set
-        "test":  "test_freq",    # use frequent-emotion test set
+        "val":   "valid_freq",
+        "test":  "test_freq",
     }
 
     for split_name, hf_split in split_map.items():
-        # Each config IS the split; the only actual split within each config is "train"
         ds = load_dataset("IVLLab/MultiDialog", hf_split, split="train", trust_remote_code=True)
         rows = []
         for sample in ds:
-            raw_emo = str(sample.get("emotion", "neutral")).strip().lower()
-            emo_name = MULTIDIALOG_EMO_MAP.get(raw_emo, "neutral")
-            # Map canonical name → int via CANONICAL_EMOTIONS order
-            emo_int = EMOTION2ID.get(emo_name, 0)
+            emo_name = str(sample.get("emotion", "neutral")).strip().lower()
             rows.append({
                 "Dialogue_ID":  str(sample.get("conv_id", 0)),
                 "Utterance_ID": str(sample.get("turn_id", 0)),
                 "Utterance":    str(sample.get("value", "")).strip(),
                 "Speaker":      str(sample.get("from", "spk_0")).strip(),
-                "Emotion":      emo_int,
+                "Emotion":      emo_name,
             })
 
         out_path = os.path.join(out_dir, f"{split_name}.csv")
@@ -222,24 +193,15 @@ def prep_multidialog(out_dir: str):
         total_convs = len(set(r["Dialogue_ID"] for r in rows))
         print(f"  {split_name}: {total_convs} conversations, {len(rows)} utterances → {out_path}")
 
-    # Emotion map for reference
     with open(os.path.join(out_dir, "emotion_map.json"), "w") as f:
-        json.dump(MULTIDIALOG_EMO_MAP, f, indent=2)
+        unique_emos = sorted(set(r["Emotion"] for r in rows))
+        json.dump({e: e for e in unique_emos}, f, indent=2)
     print("  MultiDialog prep done.")
 
 
 # ── EmoryNLP ──────────────────────────────────────────────────────────────────
-# 7 dispositional emotion labels — annotated at scene level per character,
-# making this the strongest validation dataset for dispositional prediction.
-EMORYNLP_EMO_MAP = {
-    "neutral":  "neutral",
-    "joyful":   "joy",
-    "peaceful": "neutral",   # closest canonical
-    "powerful": "joy",       # closest canonical (excited/energized)
-    "scared":   "fear",
-    "mad":      "anger",
-    "sad":      "sadness",
-}
+# Original labels: Neutral, Joyful, Peaceful, Powerful, Scared, Mad, Sad
+# Stored lowercase as-is — no remapping.
 
 EMORYNLP_BASE = (
     "https://raw.githubusercontent.com/emorynlp/emotion-detection/master/json"
@@ -268,16 +230,13 @@ def prep_emorynlp(out_dir: str):
             data = json.load(f)
 
         rows = []
-        # EmoryNLP structure: {season_id, episodes: [{episode_id, scenes: [{scene_id, utterances}]}]}
         episodes = data.get("episodes", []) if isinstance(data, dict) else data
         for episode in episodes:
             for scene in episode.get("scenes", []):
                 scene_id   = scene.get("scene_id", "unknown")
                 utterances = scene.get("utterances", [])
                 for utt in utterances:
-                    raw_emo  = str(utt.get("emotion", "Neutral")).strip().lower()
-                    emo_name = EMORYNLP_EMO_MAP.get(raw_emo, "neutral")
-                    emo_int  = EMOTION2ID.get(emo_name, 0)
+                    emo_name = str(utt.get("emotion", "Neutral")).strip().lower()
                     speakers = utt.get("speakers", ["unknown"])
                     speaker  = speakers[0] if speakers else "unknown"
                     rows.append({
@@ -285,7 +244,7 @@ def prep_emorynlp(out_dir: str):
                         "Utterance_ID": utt.get("utterance_id", ""),
                         "Utterance":    utt.get("transcript", "").strip(),
                         "Speaker":      speaker,
-                        "Emotion":      emo_int,
+                        "Emotion":      emo_name,
                     })
 
         out_path = os.path.join(out_dir, f"{split_name}.csv")
@@ -299,7 +258,8 @@ def prep_emorynlp(out_dir: str):
         print(f"  {split_name}: {total_convs} scenes, {len(rows)} utterances → {out_path}")
 
     with open(os.path.join(out_dir, "emotion_map.json"), "w") as f:
-        json.dump(EMORYNLP_EMO_MAP, f, indent=2)
+        unique_emos = sorted(set(r["Emotion"] for r in rows))
+        json.dump({e: e for e in unique_emos}, f, indent=2)
     print("  EmoryNLP prep done.")
 
 

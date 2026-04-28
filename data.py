@@ -170,12 +170,22 @@ class ConversationDataset(Dataset):
             int_to_name = {i: v for i, v in enumerate(unique)}
 
         if emotion2id is None:
-            # Build canonical mapping (train split only)
+            # Build mapping from what is actually present in this dataset's training split.
+            # Resolve every raw emotion value first (handles both int CSV and string CSV).
+            def _resolve(raw):
+                try:
+                    return int_to_name.get(int(raw), str(raw).strip().lower())
+                except (ValueError, TypeError):
+                    return str(raw).strip().lower()
+
+            actual_emos = set(_resolve(r[dc.emotion_col]) for r in rows)
             emotion2id = {}
+            # Preserve canonical order for any emotions that overlap
             for name in CANONICAL_EMOTIONS:
-                if name in int_to_name.values():
+                if name in actual_emos:
                     emotion2id[name] = len(emotion2id)
-            for name in int_to_name.values():
+            # Add dataset-specific emotions not in canonical list
+            for name in sorted(actual_emos):
                 if name not in emotion2id:
                     emotion2id[name] = len(emotion2id)
 
