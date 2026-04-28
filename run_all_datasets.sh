@@ -89,7 +89,20 @@ ensure_csv() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. EmoryNLP  (GitHub — dispositional labels, best match for our task)
+# 1. MultiDialog  (IVLLab/MultiDialog — public, 7 emotions, 151k utterances)
+# ─────────────────────────────────────────────────────────────────────────────
+MULTIDIALOG_DIR="./data/multidialog"
+ensure_csv "multidialog" "$MULTIDIALOG_DIR"
+
+run_dataset "multidialog" "MultiDialog" \
+  --local_data      "$MULTIDIALOG_DIR" \
+  --utterance_col   "Utterance"        \
+  --speaker_col     "Speaker"          \
+  --emotion_col     "Emotion"          \
+  --dialogue_id_col "Dialogue_ID"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. EmoryNLP  (GitHub — dispositional labels, best match for our task)
 # ─────────────────────────────────────────────────────────────────────────────
 EMORYNLP_DIR="./data/emorynlp"
 ensure_csv "emorynlp" "$EMORYNLP_DIR"
@@ -102,7 +115,7 @@ run_dataset "emorynlp" "EmoryNLP" \
   --dialogue_id_col "Dialogue_ID"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. IEMOCAP  (Berzerker/IEMOCAP — txt files, no auth needed)
+# 3. IEMOCAP  (Berzerker/IEMOCAP — txt files, no auth needed)
 # ─────────────────────────────────────────────────────────────────────────────
 IEMOCAP_DIR="./data/iemocap"
 ensure_csv "iemocap" "$IEMOCAP_DIR"
@@ -112,19 +125,6 @@ run_dataset "iemocap" "IEMOCAP" \
   --utterance_col   "Utterance"    \
   --speaker_col     "Speaker"      \
   --emotion_col     "Emotion"      \
-  --dialogue_id_col "Dialogue_ID"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. MultiDialog  (IVLLab/MultiDialog — public, 7 emotions, 151k utterances)
-# ─────────────────────────────────────────────────────────────────────────────
-MULTIDIALOG_DIR="./data/multidialog"
-ensure_csv "multidialog" "$MULTIDIALOG_DIR"
-
-run_dataset "multidialog" "MultiDialog" \
-  --local_data      "$MULTIDIALOG_DIR" \
-  --utterance_col   "Utterance"        \
-  --speaker_col     "Speaker"          \
-  --emotion_col     "Emotion"          \
   --dialogue_id_col "Dialogue_ID"
 
 # ─────────────────────────────────────────────────────────────────────────────

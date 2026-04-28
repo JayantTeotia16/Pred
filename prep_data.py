@@ -171,7 +171,8 @@ def prep_multidialog(out_dir: str):
     }
 
     for split_name, hf_split in split_map.items():
-        ds = load_dataset("IVLLab/MultiDialog", hf_split, split="train", trust_remote_code=True)
+        # Each config's internal split name matches the config name
+        ds = load_dataset("IVLLab/MultiDialog", hf_split, split=hf_split, trust_remote_code=True)
         rows = []
         for sample in ds:
             emo_name = str(sample.get("emotion", "neutral")).strip().lower()
