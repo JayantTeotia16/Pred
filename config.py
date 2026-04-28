@@ -137,7 +137,7 @@ class TrainingConfig:
     staged_training: bool  = False
     phase1_epochs: int     = 8    # warm-up : LoRA frozen, dispositional only
     phase2_epochs: int     = 3    # joint   : LoRA + dispositional co-adapt
-    phase3_epochs: int     = 5    # refine  : LoRA frozen, dispositional converges
+    phase3_epochs: int     = 20   # refine  : LoRA frozen, dispositional converges
     phase1_lr: float       = 1e-3 # higher LR for phase 1 (LoRA frozen — safe to push harder)
     lora_lr: float         = 3e-5 # separate (smaller) LR for LoRA in phase 2
 

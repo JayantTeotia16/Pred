@@ -267,21 +267,23 @@ def prep_emorynlp(out_dir: str):
             data = json.load(f)
 
         rows = []
-        for dial_idx, episode in enumerate(data):
-            # EmoryNLP structure: episode → scenes → utterances
-            scenes = episode.get("scenes", [episode])  # fallback if flat
-            for scene in scenes:
-                scene_id  = scene.get("scene_id", str(dial_idx))
+        # EmoryNLP structure: {season_id, episodes: [{episode_id, scenes: [{scene_id, utterances}]}]}
+        episodes = data.get("episodes", []) if isinstance(data, dict) else data
+        for episode in episodes:
+            for scene in episode.get("scenes", []):
+                scene_id   = scene.get("scene_id", "unknown")
                 utterances = scene.get("utterances", [])
                 for utt in utterances:
                     raw_emo  = str(utt.get("emotion", "Neutral")).strip().lower()
                     emo_name = EMORYNLP_EMO_MAP.get(raw_emo, "neutral")
                     emo_int  = EMOTION2ID.get(emo_name, 0)
+                    speakers = utt.get("speakers", ["unknown"])
+                    speaker  = speakers[0] if speakers else "unknown"
                     rows.append({
                         "Dialogue_ID":  scene_id,
                         "Utterance_ID": utt.get("utterance_id", ""),
                         "Utterance":    utt.get("transcript", "").strip(),
-                        "Speaker":      utt.get("speaker",    "unknown").strip(),
+                        "Speaker":      speaker,
                         "Emotion":      emo_int,
                     })
 
