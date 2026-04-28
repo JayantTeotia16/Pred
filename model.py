@@ -22,7 +22,7 @@ derived from what that speaker has said in THIS conversation.
 
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from transformers import AutoModel
@@ -31,7 +31,8 @@ from dispositional_module import (
     PerturbationEncoder,
     DynamicSpeakerContext,
     EmotionLabelContext,
-    PredictiveCodingEmotionModule,
+    CausalTransformerDynamics,
+    FusionGate,
     SceneDynamicsField,
     PredictionHead,
     SIGReg,
@@ -121,27 +122,31 @@ class DispositionalPredictionModel(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        self.llama_encoder    = LLaMAEncoder(cfg)
-        self.perturbation_enc = PerturbationEncoder(cfg.llama_hidden_size, cfg.perturbation_dim)
-        self.speaker_context  = DynamicSpeakerContext(cfg)
-        self.label_context    = EmotionLabelContext(cfg)
-        self.pcem             = PredictiveCodingEmotionModule(cfg)
-        self.scene_dynamics   = SceneDynamicsField(cfg) if cfg.use_scene_dynamics else None
+        self.llama_encoder      = LLaMAEncoder(cfg)
+        self.perturbation_enc   = PerturbationEncoder(cfg.llama_hidden_size, cfg.perturbation_dim)
+        self.speaker_context    = DynamicSpeakerContext(cfg)
+        self.label_context      = EmotionLabelContext(cfg)
+        self.personal_dynamics  = CausalTransformerDynamics(cfg)
+        self.scene_dynamics     = SceneDynamicsField(cfg) if cfg.use_scene_dynamics else None
 
         scene_dim = cfg.scene_state_dim if cfg.use_scene_dynamics else 0
 
-        # Prior head — applied to belief BEFORE utterance t (no leakage by design)
-        self.prediction_head = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
+        # Primary prior head
+        self.prediction_head  = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
 
         # Auxiliary: multi-step future prediction heads (training only)
-        self.future_head_1   = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
-        self.future_head_2   = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
+        self.future_head_1    = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
+        self.future_head_2    = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
 
-        # Posterior head — applied to belief AFTER precision-weighted error correction
-        self.posterior_head  = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
+        # Prior + posterior fusion
+        self.fusion_gate      = FusionGate(cfg.dispositional_state_dim, cfg.perturbation_dim)
+        self.posterior_head   = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
 
-        # SIGReg — Gaussian regulariser on belief state space
-        self.sigreg          = SIGReg(n_projections=256)
+        # SIGReg — Gaussian regulariser on dispositional state space
+        self.sigreg           = SIGReg(n_projections=256)
+
+        # JEPA predictor: s(t) → ẑ_{t+1} in perturbation space
+        self.jepa_predictor   = nn.Linear(cfg.dispositional_state_dim, cfg.perturbation_dim)
 
 
     # ── Forward ────────────────────────────────────────────────────────────
@@ -223,27 +228,26 @@ class DispositionalPredictionModel(nn.Module):
         all_label_ctx    = torch.stack(all_label_ctx, dim=1)     # (B, T, lc)
         all_prev_spk_emo = torch.stack(all_prev_spk_emo, dim=1)  # (B, T) long
 
-        # ── Phase 3: PCEM → prior beliefs, posterior beliefs, prediction errors ──
-        # prior_beliefs[t]  = b_s(t): belief BEFORE utterance t  (strictly causal)
-        # post_beliefs[t]   = b_s(t) + π⊙W_e·ε_t: belief AFTER error correction
-        # errors[t]         = actual_δu_t − G(b_s(t)): prediction error
-        prior_beliefs, post_beliefs, errors = self.pcem(
+        # ── Phase 3: causal transformer → dispositional states ────────────
+        disp_states = self.personal_dynamics(
             all_delta_u, all_spk_ctx, all_label_ctx, all_prev_spk_emo, valid_mask, speaker_ids
         )
 
-        # Reconstruction loss — generator in PCEM predicts δu from belief.
-        # Kept for compatibility (jepa_loss_weight=0 in config, no gradient effect).
-        recon_mse = errors.float().pow(2).mean(-1)                              # (B, T)
-        jepa_loss = (recon_mse * valid_mask.float()).sum() / valid_mask.float().sum().clamp(min=1)
+        # ── JEPA auxiliary loss — predict next δu from current state ─────────
+        jepa_pred   = self.jepa_predictor(disp_states[:, :-1])
+        jepa_target = all_delta_u[:, 1:].detach()
+        jepa_mse    = F.mse_loss(jepa_pred, jepa_target, reduction="none").mean(-1)
+        jepa_mask   = valid_mask[:, 1:].float()
+        jepa_loss   = (jepa_mse * jepa_mask).sum() / jepa_mask.sum().clamp(min=1)
 
-        # ── Phase 4a: scene states — sequential, each step depends on prev ──────
+        # ── Phase 4a: scene states — must be sequential (each step depends on prev) ──
         if self.scene_dynamics is not None:
             scene_list = []
             scene_s    = self.scene_dynamics.initial_state(B, device)
             for t in range(T):
                 scene_list.append(scene_s)
                 if t < T - 1:
-                    scene_s_new = self.scene_dynamics.step(scene_s, prior_beliefs[:, t])
+                    scene_s_new = self.scene_dynamics.step(scene_s, disp_states[:, t])
                     scene_s = torch.where(
                         valid_mask[:, t].unsqueeze(-1), scene_s_new, scene_s
                     )
@@ -251,27 +255,34 @@ class DispositionalPredictionModel(nn.Module):
         else:
             scene_states = None
 
-        # ── Phase 4b: batched predictions ────────────────────────────────────
-        s_prior_flat = prior_beliefs.view(B * T, -1)                     # (B*T, D)
-        s_post_flat  = post_beliefs.view(B * T, -1)                      # (B*T, D)
-        sc_flat      = scene_states.view(B * T, -1) if scene_states is not None else None
+        # ── Phase 4b: batched predictions — 4 head calls instead of 4*T ──────
+        s_flat  = disp_states.view(B * T, -1)
+        du_flat = all_delta_u.view(B * T, -1)
+        sc_flat = scene_states.view(B * T, -1) if scene_states is not None else None
 
-        prior_logits = self.prediction_head(s_prior_flat, sc_flat).view(B, T, -1)
-        fut1_logits  = self.future_head_1(s_prior_flat, sc_flat).view(B, T, -1)
-        fut2_logits  = self.future_head_2(s_prior_flat, sc_flat).view(B, T, -1)
+        prior_logits = self.prediction_head(s_flat, sc_flat).view(B, T, -1)
+        fut1_logits  = self.future_head_1(s_flat, sc_flat).view(B, T, -1)
+        fut2_logits  = self.future_head_2(s_flat, sc_flat).view(B, T, -1)
+        s_post_flat  = self.fusion_gate(s_flat, du_flat)
         post_logits  = self.posterior_head(s_post_flat, sc_flat).view(B, T, -1)
 
-        # ── Phase 4c: surprise = prediction error magnitude ───────────────────
-        surprise = errors.float().norm(dim=-1) * valid_mask.float()      # (B, T)
+        # ── Phase 4c: vectorized surprise (KL between consecutive priors) ─────
+        p = F.softmax(prior_logits, dim=-1).clamp(min=1e-9)
+        kl = F.kl_div(
+            p[:, :-1].log(), p[:, 1:].clamp(min=1e-9), reduction="none"
+        ).sum(-1)
+        surprise = torch.cat(
+            [torch.zeros(B, 1, device=device), kl], dim=1
+        ) * valid_mask.float()
 
         return {
             "prediction_logits":    prior_logits,                        # (B, T, E)
             "posterior_logits":     post_logits,                         # (B, T, E)
             "future_logits_1":      fut1_logits,                         # (B, T, E)
             "future_logits_2":      fut2_logits,                         # (B, T, E)
-            "dispositional_states": prior_beliefs,                       # (B, T, D)
+            "dispositional_states": disp_states,                         # (B, T, D)
             "surprise":             surprise,                            # (B, T)
-            "sigreg_loss":          self.sigreg(prior_beliefs.view(B * T, -1)),
+            "sigreg_loss":          self.sigreg(disp_states.view(B * T, -1)),
             "jepa_loss":            jepa_loss,
             "speaker_contexts":     all_spk_ctx,
             "speaker_ids":          speaker_ids,

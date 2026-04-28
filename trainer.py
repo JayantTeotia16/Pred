@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
-from sklearn.metrics import f1_score, classification_report
+from sklearn.metrics import f1_score, classification_report, accuracy_score
 from tqdm import tqdm
 
 from config import TrainingConfig
@@ -435,24 +435,58 @@ class Trainer:
         unique_labels = sorted(set(all_labels))
         target_names  = [self.emotion_labels[i] for i in unique_labels
                          if i < len(self.emotion_labels)]
-        report = classification_report(all_labels, all_prior,
-                                       labels=unique_labels,
-                                       target_names=target_names,
-                                       zero_division=0)
+
+        acc          = accuracy_score(all_labels, all_prior)
+        report_dict  = classification_report(all_labels, all_prior,
+                                             labels=unique_labels,
+                                             target_names=target_names,
+                                             output_dict=True,
+                                             zero_division=0)
+        report_text  = classification_report(all_labels, all_prior,
+                                             labels=unique_labels,
+                                             target_names=target_names,
+                                             zero_division=0)
 
         print(f"\n[{split.upper()}]")
         print(f"  Prior F1      : {wf1_prior:.4f}")
         if wf1_post is not None:
-            print(f"  Posterior F1  : {wf1_post:.4f}  (gap +{wf1_post - wf1_prior:.4f})")
+            gap = wf1_post - wf1_prior
+            print(f"  Posterior F1  : {wf1_post:.4f}  (gap +{gap:.4f})")
+        print(f"  Accuracy      : {acc:.4f}")
         print(f"  Mean Surprise : {np.mean(all_surprise):.4f}")
         print(f"  F1 by history : {bucket_f1}")
+        print(f"\n  Per-emotion (prior):")
+        print(f"  {'Emotion':<12} {'F1':>7} {'Prec':>7} {'Rec':>7} {'Support':>9}")
+        print(f"  {'-'*12} {'-'*7} {'-'*7} {'-'*7} {'-'*9}")
+        for name in target_names:
+            m = report_dict[name]
+            print(f"  {name:<12} {m['f1-score']:>7.4f} {m['precision']:>7.4f}"
+                  f" {m['recall']:>7.4f} {int(m['support']):>9}")
+
+        per_emotion = {name: report_dict[name] for name in target_names}
+
+        if split == "test":
+            metrics_out = {
+                "weighted_f1":   wf1_prior,
+                "posterior_f1":  wf1_post,
+                "accuracy":      acc,
+                "mean_surprise": float(np.mean(all_surprise)),
+                "bucket_f1":     bucket_f1,
+                "per_emotion":   per_emotion,
+            }
+            out_path = os.path.join(self.cfg.save_dir, "test_metrics.json")
+            with open(out_path, "w") as f:
+                json.dump(metrics_out, f, indent=2)
+            print(f"\n  Metrics saved → {out_path}")
 
         return {
-            f"{split}_wf1":           wf1_prior,
-            f"{split}_post_wf1":      wf1_post,
-            f"{split}_mean_surprise":  float(np.mean(all_surprise)),
-            f"{split}_bucket_f1":      bucket_f1,
-            "report":                  report,
+            f"{split}_wf1":          wf1_prior,
+            f"{split}_post_wf1":     wf1_post,
+            f"{split}_accuracy":     acc,
+            f"{split}_mean_surprise": float(np.mean(all_surprise)),
+            f"{split}_bucket_f1":    bucket_f1,
+            f"{split}_per_emotion":  per_emotion,
+            "report":                report_text,
         }
 
     # ── Full run ───────────────────────────────────────────────────────────
