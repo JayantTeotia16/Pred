@@ -131,6 +131,9 @@ class TrainingConfig:
     # Prior + posterior fusion
     posterior_loss_weight: float = 0.5  # CE on posterior head during training
 
+    # Recognition head (utterance-only, no history) — comparison baseline
+    recognition_loss_weight: float = 1.0  # CE on recognition head during training
+
     max_conversation_length: int   = 30
 
     # ── Staged training ───────────────────────────────────────────────────

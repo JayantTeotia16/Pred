@@ -148,6 +148,9 @@ class DispositionalPredictionModel(nn.Module):
         # JEPA predictor: s(t) → ẑ_{t+1} in perturbation space
         self.jepa_predictor   = nn.Linear(cfg.dispositional_state_dim, cfg.perturbation_dim)
 
+        # Recognition head: δu(t) only → emotion (no history, utterance-only baseline)
+        self.recognition_head = PredictionHead(cfg.perturbation_dim, cfg.num_emotions, 0)
+
 
     # ── Forward ────────────────────────────────────────────────────────────
 
@@ -260,11 +263,12 @@ class DispositionalPredictionModel(nn.Module):
         du_flat = all_delta_u.view(B * T, -1)
         sc_flat = scene_states.view(B * T, -1) if scene_states is not None else None
 
-        prior_logits = self.prediction_head(s_flat, sc_flat).view(B, T, -1)
-        fut1_logits  = self.future_head_1(s_flat, sc_flat).view(B, T, -1)
-        fut2_logits  = self.future_head_2(s_flat, sc_flat).view(B, T, -1)
-        s_post_flat  = self.fusion_gate(s_flat, du_flat)
-        post_logits  = self.posterior_head(s_post_flat, sc_flat).view(B, T, -1)
+        prior_logits  = self.prediction_head(s_flat, sc_flat).view(B, T, -1)
+        fut1_logits   = self.future_head_1(s_flat, sc_flat).view(B, T, -1)
+        fut2_logits   = self.future_head_2(s_flat, sc_flat).view(B, T, -1)
+        s_post_flat   = self.fusion_gate(s_flat, du_flat)
+        post_logits   = self.posterior_head(s_post_flat, sc_flat).view(B, T, -1)
+        recog_logits  = self.recognition_head(du_flat, None).view(B, T, -1)
 
         # ── Phase 4c: vectorized surprise (KL between consecutive priors) ─────
         p = F.softmax(prior_logits, dim=-1).clamp(min=1e-9)
@@ -278,6 +282,7 @@ class DispositionalPredictionModel(nn.Module):
         return {
             "prediction_logits":    prior_logits,                        # (B, T, E)
             "posterior_logits":     post_logits,                         # (B, T, E)
+            "recognition_logits":   recog_logits,                        # (B, T, E)
             "future_logits_1":      fut1_logits,                         # (B, T, E)
             "future_logits_2":      fut2_logits,                         # (B, T, E)
             "dispositional_states": disp_states,                         # (B, T, D)
@@ -320,8 +325,9 @@ class DispositionalPredictionModel(nn.Module):
         """Rebuild all prediction heads when switching datasets."""
         scene_dim = self.cfg.scene_state_dim if self.cfg.use_scene_dynamics else 0
         sd        = self.cfg.dispositional_state_dim
-        self.prediction_head = PredictionHead(sd, num_emotions, scene_dim)
-        self.future_head_1   = PredictionHead(sd, num_emotions, scene_dim)
-        self.future_head_2   = PredictionHead(sd, num_emotions, scene_dim)
-        self.posterior_head  = PredictionHead(sd, num_emotions, scene_dim)
+        self.prediction_head  = PredictionHead(sd, num_emotions, scene_dim)
+        self.future_head_1    = PredictionHead(sd, num_emotions, scene_dim)
+        self.future_head_2    = PredictionHead(sd, num_emotions, scene_dim)
+        self.posterior_head   = PredictionHead(sd, num_emotions, scene_dim)
+        self.recognition_head = PredictionHead(self.cfg.perturbation_dim, num_emotions, 0)
         self.cfg.num_emotions = num_emotions

@@ -172,10 +172,11 @@ for key, display in DATASET_NAMES.items():
 
     summary_rows.append({
         "dataset":        display,
-        "accuracy":       round(m.get("accuracy",     0), 4),
-        "weighted_f1":    round(m.get("weighted_f1",  0), 4),
-        "posterior_f1":   round(m.get("posterior_f1", 0) or 0, 4),
-        "mean_surprise":  round(m.get("mean_surprise",0), 4),
+        "accuracy":       round(m.get("accuracy",       0), 4),
+        "weighted_f1":    round(m.get("weighted_f1",    0), 4),
+        "recognition_f1": round(m.get("recognition_f1", 0) or 0, 4),
+        "posterior_f1":   round(m.get("posterior_f1",   0) or 0, 4),
+        "mean_surprise":  round(m.get("mean_surprise",  0), 4),
         **{f"bucket_f1_{k}": round(v, 4)
            for k, v in m.get("bucket_f1", {}).items()},
     })

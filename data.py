@@ -214,11 +214,11 @@ class ConversationDataset(Dataset):
             for i, r in enumerate(d_rows):
                 utterance = str(r[dc.utterance_col])
 
-                # Emotion
+                # Emotion — pandas reads CSV integers as numpy.int64, not Python int
                 raw_emo = r[dc.emotion_col]
-                if isinstance(raw_emo, int):
-                    emo_name = int_to_name.get(raw_emo, "neutral")
-                else:
+                try:
+                    emo_name = int_to_name.get(int(raw_emo), "neutral")
+                except (ValueError, TypeError):
                     emo_name = str(raw_emo).strip().lower()
                 emo_id = emotion2id.get(emo_name, 0)
 

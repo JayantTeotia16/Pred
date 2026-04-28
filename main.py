@@ -152,12 +152,13 @@ def main():
     parser.add_argument("--output_dir",  default="./checkpoints")
     parser.add_argument("--analysis_dir",default="./analysis_outputs")
     # Loss weight overrides (default=None → use config.py values)
-    parser.add_argument("--posterior_loss_weight",   type=float, default=None)
-    parser.add_argument("--surprise_reg_weight",     type=float, default=None)
-    parser.add_argument("--contrastive_loss_weight", type=float, default=None)
-    parser.add_argument("--future_pred_weight_1",    type=float, default=None)
-    parser.add_argument("--future_pred_weight_2",    type=float, default=None)
-    parser.add_argument("--focal_gamma",             type=float, default=None)
+    parser.add_argument("--posterior_loss_weight",    type=float, default=None)
+    parser.add_argument("--recognition_loss_weight",  type=float, default=None)
+    parser.add_argument("--surprise_reg_weight",      type=float, default=None)
+    parser.add_argument("--contrastive_loss_weight",  type=float, default=None)
+    parser.add_argument("--future_pred_weight_1",     type=float, default=None)
+    parser.add_argument("--future_pred_weight_2",     type=float, default=None)
+    parser.add_argument("--focal_gamma",              type=float, default=None)
     args = parser.parse_args()
 
     cfg = ExperimentConfig()
@@ -181,6 +182,7 @@ def main():
     cfg.training.save_dir        = args.output_dir
 
     if args.posterior_loss_weight   is not None: cfg.training.posterior_loss_weight   = args.posterior_loss_weight
+    if args.recognition_loss_weight is not None: cfg.training.recognition_loss_weight = args.recognition_loss_weight
     if args.surprise_reg_weight     is not None: cfg.training.surprise_reg_weight     = args.surprise_reg_weight
     if args.contrastive_loss_weight is not None: cfg.training.contrastive_loss_weight = args.contrastive_loss_weight
     if args.future_pred_weight_1    is not None: cfg.training.future_pred_weight_1    = args.future_pred_weight_1

@@ -88,6 +88,7 @@ class PredictionLoss(nn.Module):
         self.w_surp   = cfg.surprise_reg_weight
         self.w_cont   = cfg.contrastive_loss_weight
         self.w_post   = cfg.posterior_loss_weight
+        self.w_recog  = cfg.recognition_loss_weight
         self.w_fut1   = cfg.future_pred_weight_1
         self.w_fut2   = cfg.future_pred_weight_2
         self.w_sig    = cfg.sigreg_loss_weight
@@ -147,6 +148,12 @@ class PredictionLoss(nn.Module):
                  if logits_post is not None and self.w_post > 0 \
                  else torch.tensor(0.0, device=device)
 
+        # ── Recognition loss (utterance-only head, no cold-start mask) ───
+        logits_recog = outputs.get("recognition_logits")
+        L_recog = self._masked_ce(logits_recog, labels, (labels >= 0).float()) \
+                  if logits_recog is not None and self.w_recog > 0 \
+                  else torch.tensor(0.0, device=device)
+
         # ── Future prediction losses (shifted labels, padding-only mask) ──
         pad_valid = (labels >= 0).float()   # no cold-start for auxiliary task
 
@@ -179,13 +186,15 @@ class PredictionLoss(nn.Module):
         L_jepa = outputs.get("jepa_loss",   torch.tensor(0.0, device=device))
 
         total = (self.w_pred * L_pred + self.w_surp * L_surp +
-                 self.w_post * L_post + self.w_fut1 * L_fut1 + self.w_fut2 * L_fut2 +
+                 self.w_post * L_post + self.w_recog * L_recog +
+                 self.w_fut1 * L_fut1 + self.w_fut2 * L_fut2 +
                  self.w_cont * L_cont + self.w_sig * L_sig + self.w_jepa * L_jepa)
 
         return total, {
             "loss_total":       total.item(),
             "loss_pred":        L_pred.item(),
             "loss_post":        L_post.item(),
+            "loss_recog":       L_recog.item(),
             "loss_fut1":        L_fut1.item(),
             "loss_fut2":        L_fut2.item(),
             "loss_surprise":    L_surp.item(),
@@ -272,7 +281,8 @@ class Trainer:
             for c in range(self.model.cfg.num_emotions):
                 counts[c] += (labels == c).sum().item()
         for head in [self.model.prediction_head, self.model.future_head_1,
-                     self.model.future_head_2, self.model.posterior_head]:
+                     self.model.future_head_2, self.model.posterior_head,
+                     self.model.recognition_head]:
             head.set_prior(counts)
         print(f"  Head priors set — counts: {counts.long().tolist()}")
 
@@ -391,6 +401,7 @@ class Trainer:
     def evaluate(self, loader: DataLoader, split: str = "val") -> Dict:
         self.model.eval()
         all_prior, all_post, all_labels, all_turns = [], [], [], []
+        all_recog_preds, all_recog_labels = [], []
         all_surprise = []
 
         bar = tqdm(loader, desc=f"[{split.upper()}]", unit="batch",
@@ -403,11 +414,16 @@ class Trainer:
             p, l, t = collect_predictions(outputs, self.cfg.min_history_turns)
             all_prior.extend(p); all_labels.extend(l); all_turns.extend(t)
 
-            # Posterior predictions (if model produces them)
             if "posterior_logits" in outputs:
                 out_post = {**outputs, "prediction_logits": outputs["posterior_logits"]}
                 p_post, _, _ = collect_predictions(out_post, self.cfg.min_history_turns)
                 all_post.extend(p_post)
+
+            # Recognition: utterance-only head, no cold-start (every valid turn counts)
+            if "recognition_logits" in outputs:
+                out_r = {**outputs, "prediction_logits": outputs["recognition_logits"]}
+                pr, lr, _ = collect_predictions(out_r, min_history=0)
+                all_recog_preds.extend(pr); all_recog_labels.extend(lr)
 
             mask = (outputs["emotion_ids"] >= 0)
             mask[:, :self.cfg.min_history_turns] = False
@@ -422,6 +438,9 @@ class Trainer:
         wf1_prior = f1_score(all_labels, all_prior, average="weighted", zero_division=0)
         wf1_post  = f1_score(all_labels, np.array(all_post), average="weighted", zero_division=0) \
                     if all_post else None
+        wf1_recog = f1_score(np.array(all_recog_labels), np.array(all_recog_preds),
+                             average="weighted", zero_division=0) \
+                    if all_recog_preds else None
 
         # F1 by history length bucket
         bucket_f1 = {}
@@ -449,9 +468,12 @@ class Trainer:
 
         print(f"\n[{split.upper()}]")
         print(f"  Prior F1      : {wf1_prior:.4f}")
+        if wf1_recog is not None:
+            gap = wf1_recog - wf1_prior
+            print(f"  Recognition F1: {wf1_recog:.4f}  (gap vs prior {gap:+.4f})")
         if wf1_post is not None:
             gap = wf1_post - wf1_prior
-            print(f"  Posterior F1  : {wf1_post:.4f}  (gap +{gap:.4f})")
+            print(f"  Posterior F1  : {wf1_post:.4f}  (gap vs prior {gap:+.4f})")
         print(f"  Accuracy      : {acc:.4f}")
         print(f"  Mean Surprise : {np.mean(all_surprise):.4f}")
         print(f"  F1 by history : {bucket_f1}")
@@ -467,12 +489,13 @@ class Trainer:
 
         if split == "test":
             metrics_out = {
-                "weighted_f1":   wf1_prior,
-                "posterior_f1":  wf1_post,
-                "accuracy":      acc,
-                "mean_surprise": float(np.mean(all_surprise)),
-                "bucket_f1":     bucket_f1,
-                "per_emotion":   per_emotion,
+                "weighted_f1":     wf1_prior,
+                "recognition_f1":  wf1_recog,
+                "posterior_f1":    wf1_post,
+                "accuracy":        acc,
+                "mean_surprise":   float(np.mean(all_surprise)),
+                "bucket_f1":       bucket_f1,
+                "per_emotion":     per_emotion,
             }
             out_path = os.path.join(self.cfg.save_dir, "test_metrics.json")
             with open(out_path, "w") as f:
@@ -480,13 +503,14 @@ class Trainer:
             print(f"\n  Metrics saved → {out_path}")
 
         return {
-            f"{split}_wf1":          wf1_prior,
-            f"{split}_post_wf1":     wf1_post,
-            f"{split}_accuracy":     acc,
+            f"{split}_wf1":           wf1_prior,
+            f"{split}_recog_wf1":     wf1_recog,
+            f"{split}_post_wf1":      wf1_post,
+            f"{split}_accuracy":      acc,
             f"{split}_mean_surprise": float(np.mean(all_surprise)),
-            f"{split}_bucket_f1":    bucket_f1,
-            f"{split}_per_emotion":  per_emotion,
-            "report":                report_text,
+            f"{split}_bucket_f1":     bucket_f1,
+            f"{split}_per_emotion":   per_emotion,
+            "report":                 report_text,
         }
 
     # ── Full run ───────────────────────────────────────────────────────────
