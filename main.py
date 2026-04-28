@@ -162,6 +162,14 @@ def main():
 
     cfg = ExperimentConfig()
     cfg.model.llama_model_name   = args.llama_model
+    # Auto-detect hidden size so any LLaMA variant works without editing config.py
+    try:
+        from transformers import AutoConfig as _AC
+        _mc = _AC.from_pretrained(args.llama_model)
+        cfg.model.llama_hidden_size = _mc.hidden_size
+        print(f"  LLaMA hidden size auto-detected: {cfg.model.llama_hidden_size}")
+    except Exception:
+        print(f"  LLaMA hidden size: {cfg.model.llama_hidden_size} (from config, detection failed)")
     cfg.model.use_scene_dynamics = not args.no_scene
     cfg.model.use_lora             = not args.no_lora
     if args.baseline and args.staged_training:
