@@ -91,12 +91,7 @@ ensure_csv() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. MELD  (direct HuggingFace — no preprocessing needed)
-# ─────────────────────────────────────────────────────────────────────────────
-run_dataset "meld" "MELD (eusip/silicone meld_e)"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. DailyDialog
+# 1. DailyDialog  (via eusip/silicone dyda_e — avoids broken daily_dialog zip)
 # ─────────────────────────────────────────────────────────────────────────────
 DAILYDIALOG_DIR="./data/dailydialog"
 ensure_csv "dailydialog" "$DAILYDIALOG_DIR"
@@ -109,7 +104,7 @@ run_dataset "dailydialog" "DailyDialog" \
   --dialogue_id_col "Dialogue_ID"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. IEMOCAP  (optional — skip with --skip_iemocap)
+# 2. IEMOCAP  (optional — skip with --skip_iemocap)
 # ─────────────────────────────────────────────────────────────────────────────
 IEMOCAP_DIR="./data/iemocap"
 if [[ $SKIP_IEMOCAP -eq 1 ]]; then
@@ -132,6 +127,11 @@ if [[ $SKIP_IEMOCAP -eq 0 && -f "$IEMOCAP_DIR/train.csv" ]]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3. MELD  (direct HuggingFace — no preprocessing needed)
+# ─────────────────────────────────────────────────────────────────────────────
+run_dataset "meld" "MELD (eusip/silicone meld_e)"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Compile results CSV
 # ─────────────────────────────────────────────────────────────────────────────
 header "Compiling Results → $RESULTS_CSV"
@@ -142,7 +142,7 @@ import os, json, csv, sys
 ckpt_base   = sys.argv[1]
 results_csv = sys.argv[2]
 
-DATASET_NAMES = {"meld": "MELD", "dailydialog": "DailyDialog", "iemocap": "IEMOCAP"}
+DATASET_NAMES = {"dailydialog": "DailyDialog", "iemocap": "IEMOCAP", "meld": "MELD"}
 
 summary_rows  = []   # one row per dataset (overall metrics)
 emotion_rows  = []   # one row per dataset × emotion

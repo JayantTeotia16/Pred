@@ -21,27 +21,31 @@ DAILYDIALOG_INT_TO_NAME = {
 
 
 def prep_dailydialog(out_dir: str):
+    """
+    Uses eusip/silicone dyda_e — DailyDialog already in row-per-utterance format,
+    same schema as MELD. Avoids the broken daily_dialog HF dataset zip handling.
+    Emotions: 0=no_emotion(neutral),1=anger,2=disgust,3=fear,4=happiness(joy),
+              5=sadness,6=surprise
+    """
     from datasets import load_dataset
-    print("Downloading DailyDialog...")
-    ds = load_dataset("daily_dialog", trust_remote_code=True)
+    import json
 
+    print("Downloading DailyDialog via eusip/silicone dyda_e ...")
+    split_map = {"train": "train", "val": "validation", "test": "test"}
     os.makedirs(out_dir, exist_ok=True)
 
-    split_map = {"train": "train", "val": "validation", "test": "test"}
     for split_name, hf_split in split_map.items():
+        ds = load_dataset("eusip/silicone", "dyda_e",
+                          split=hf_split, trust_remote_code=True)
         rows = []
-        for dial_id, sample in enumerate(ds[hf_split]):
-            utterances = sample["dialog"]
-            emotions   = sample["emotion"]
-            for utt_id, (utt, emo) in enumerate(zip(utterances, emotions)):
-                speaker = f"spk_{utt_id % 2}"   # dyadic: alternate speakers
-                rows.append({
-                    "Dialogue_ID":  dial_id,
-                    "Utterance_ID": utt_id,
-                    "Utterance":    utt.strip(),
-                    "Speaker":      speaker,
-                    "Emotion":      emo,
-                })
+        for sample in ds:
+            rows.append({
+                "Dialogue_ID":  sample.get("Dialogue_ID", sample.get("dialogue_id", 0)),
+                "Utterance_ID": sample.get("Utterance_ID", sample.get("utterance_id", 0)),
+                "Utterance":    str(sample.get("Utterance",  sample.get("utterance", ""))).strip(),
+                "Speaker":      str(sample.get("Speaker",    sample.get("speaker", "spk_0"))).strip(),
+                "Emotion":      sample.get("Emotion", sample.get("emotion", 0)),
+            })
 
         out_path = os.path.join(out_dir, f"{split_name}.csv")
         with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -50,11 +54,9 @@ def prep_dailydialog(out_dir: str):
             writer.writeheader()
             writer.writerows(rows)
 
-        total_convs = len(set(r["Dialogue_ID"] for r in rows))
+        total_convs = len(set(str(r["Dialogue_ID"]) for r in rows))
         print(f"  {split_name}: {total_convs} conversations, {len(rows)} utterances → {out_path}")
 
-    # Write emotion map for reference
-    import json
     with open(os.path.join(out_dir, "emotion_map.json"), "w") as f:
         json.dump(DAILYDIALOG_INT_TO_NAME, f, indent=2)
     print("  DailyDialog prep done.")
