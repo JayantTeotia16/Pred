@@ -268,7 +268,7 @@ class DispositionalPredictionModel(nn.Module):
         fut2_logits   = self.future_head_2(s_flat, sc_flat).view(B, T, -1)
         s_post_flat   = self.fusion_gate(s_flat, du_flat)
         post_logits   = self.posterior_head(s_post_flat, sc_flat).view(B, T, -1)
-        recog_logits  = self.recognition_head(du_flat, None).view(B, T, -1)
+        recog_logits  = self.recognition_head(du_flat.detach(), None).view(B, T, -1)
 
         # ── Phase 4c: vectorized surprise (KL between consecutive priors) ─────
         p = F.softmax(prior_logits, dim=-1).clamp(min=1e-9)
