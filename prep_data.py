@@ -15,11 +15,17 @@ import csv
 
 
 # ── DailyDialog ───────────────────────────────────────────────────────────────
-# Original labels: 0=no_emotion, 1=anger, 2=disgust, 3=fear,
-#                  4=happiness, 5=sadness, 6=surprise
+# Original labels (silicone dyda_e returns strings; fallback int map if needed)
 DAILYDIALOG_INT_TO_NAME = {
     0: "no_emotion", 1: "anger", 2: "disgust", 3: "fear",
     4: "happiness",  5: "sadness", 6: "surprise",
+}
+# Normalize string variants returned by the HF dataset
+DAILYDIALOG_STR_NORM = {
+    "no emotion": "no_emotion",
+    "no_emotion": "no_emotion",
+    "happiness":  "happiness",
+    "happy":      "happiness",
 }
 
 
@@ -36,8 +42,12 @@ def prep_dailydialog(out_dir: str):
                           split=hf_split, trust_remote_code=True)
         rows = []
         for sample in ds:
-            raw_int = sample.get("Emotion", sample.get("emotion", 0))
-            emo_name = DAILYDIALOG_INT_TO_NAME.get(int(raw_int), "no_emotion")
+            raw = sample.get("Emotion", sample.get("emotion", 0))
+            try:
+                emo_name = DAILYDIALOG_INT_TO_NAME.get(int(raw), "no_emotion")
+            except (ValueError, TypeError):
+                raw_str = str(raw).strip().lower()
+                emo_name = DAILYDIALOG_STR_NORM.get(raw_str, raw_str.replace(" ", "_"))
             rows.append({
                 "Dialogue_ID":  sample.get("Dialogue_ID", sample.get("dialogue_id", 0)),
                 "Utterance_ID": sample.get("Utterance_ID", sample.get("utterance_id", 0)),
