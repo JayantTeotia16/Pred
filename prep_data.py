@@ -351,29 +351,62 @@ def prep_appraisal(out_dir: str, source: str = "all"):
     df["Dialogue_ID"] = df["dataset"].astype(str).str.lower().str.replace(" ", "_") \
                         + "_" + df["Dialogue_ID"].astype(str)
 
-    # Map Set column: dev → val
-    set_map = {"train": "train", "dev": "val", "test": "test",
-               "Train": "train", "Dev": "val", "Test": "test"}
-    df["_split"] = df["Set"].map(set_map).fillna("train")
+    # Map Set column → internal split name, covering all known variant spellings
+    set_map = {
+        "train": "train", "Train": "train", "TRAIN": "train",
+        "dev":   "val",   "Dev":   "val",   "DEV":   "val",
+        "valid": "val",   "Valid": "val",   "validation": "val", "Validation": "val",
+        "test":  "test",  "Test":  "test",  "TEST":  "test",
+        "tst":   "test",  "Tst":   "test",  "TST":   "test",
+    }
+    df["_split"] = df["Set"].astype(str).str.strip().map(set_map).fillna("train")
+    print(f"  Set → split mapping: { {k: v for k, v in zip(df['Set'].astype(str), df['_split'])} }"
+          f" (unique: {dict(zip(*zip(*set(zip(df['Set'].astype(str), df['_split'])))))})" )
 
-    all_rows = []
-    for split_name in ["train", "val", "test"]:
-        subset = df[df["_split"] == split_name].copy()
+    # Build rows per split
+    def build_rows(subset):
         rows = []
         for _, row in subset.iterrows():
             emo = str(row["Emotion"]).strip().lower()
             if emo in ("unknown", "other", "xxx", "oth"):
-                continue   # skip ambiguous labels
+                continue
             rows.append({
-                "Dialogue_ID":        str(row["Dialogue_ID"]),
-                "Utterance_ID":       str(row["Utterance_ID"]),
-                "Utterance":          str(row["Utterance"]).strip(),
-                "Speaker":            str(row["Speaker"]).strip(),
-                "Emotion":            emo,
-                "Is_Transition":      int(row.get("Is_Transition", 0)),
-                "Is_Appraisal_Driven":int(row.get("Is_Appraisal_Driven", 0)),
+                "Dialogue_ID":         str(row["Dialogue_ID"]),
+                "Utterance_ID":        str(row["Utterance_ID"]),
+                "Utterance":           str(row["Utterance"]).strip(),
+                "Speaker":             str(row["Speaker"]).strip(),
+                "Emotion":             emo,
+                "Is_Transition":       int(row.get("Is_Transition", 0)),
+                "Is_Appraisal_Driven": int(row.get("Is_Appraisal_Driven", 0)),
             })
+        return rows
 
+    train_rows = build_rows(df[df["_split"] == "train"])
+    val_rows   = build_rows(df[df["_split"] == "val"])
+    test_rows  = build_rows(df[df["_split"] == "test"])
+
+    # Auto-fallback: if val is empty, carve 10% of train dialogues
+    if len(val_rows) == 0:
+        print(f"  [WARN] No val split found — carving 10% of train dialogues for val")
+        dial_ids = list(dict.fromkeys(r["Dialogue_ID"] for r in train_rows))
+        cut = max(1, int(len(dial_ids) * 0.9))
+        val_dial = set(dial_ids[cut:])
+        val_rows   = [r for r in train_rows if r["Dialogue_ID"] in val_dial]
+        train_rows = [r for r in train_rows if r["Dialogue_ID"] not in val_dial]
+
+    # Auto-fallback: if test is empty, use val as test and re-carve val from train
+    if len(test_rows) == 0:
+        print(f"  [WARN] No test split found — using val as test, re-carving val from train")
+        test_rows = val_rows
+        dial_ids  = list(dict.fromkeys(r["Dialogue_ID"] for r in train_rows))
+        cut = max(1, int(len(dial_ids) * 0.9))
+        val_dial   = set(dial_ids[cut:])
+        val_rows   = [r for r in train_rows if r["Dialogue_ID"] in val_dial]
+        train_rows = [r for r in train_rows if r["Dialogue_ID"] not in val_dial]
+
+    from collections import Counter
+    all_rows = []
+    for split_name, rows in [("train", train_rows), ("val", val_rows), ("test", test_rows)]:
         out_path = os.path.join(out_dir, f"{split_name}.csv")
         with open(out_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["Dialogue_ID", "Utterance_ID",
@@ -383,8 +416,7 @@ def prep_appraisal(out_dir: str, source: str = "all"):
             writer.writerows(rows)
 
         total_convs = len(set(r["Dialogue_ID"] for r in rows))
-        from collections import Counter
-        emo_dist = Counter(r["Emotion"] for r in rows)
+        emo_dist    = Counter(r["Emotion"] for r in rows)
         print(f"  {split_name}: {total_convs} dialogues, {len(rows)} utterances, "
               f"{len(emo_dist)} emotions → {out_path}")
         print(f"    top emotions: {dict(emo_dist.most_common(5))}")
