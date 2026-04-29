@@ -142,6 +142,7 @@ SOURCE_NAMES = {
 
 summary_rows = []
 emotion_rows = []
+all_bucket_keys = []
 
 for key, display in SOURCE_NAMES.items():
     metrics_path = os.path.join(ckpt_base, key, "test_metrics.json")
@@ -152,6 +153,11 @@ for key, display in SOURCE_NAMES.items():
     with open(metrics_path) as f:
         m = json.load(f)
 
+    bucket_f1 = m.get("bucket_f1", {})
+    for k in bucket_f1:
+        if f"bucket_f1_{k}" not in all_bucket_keys:
+            all_bucket_keys.append(f"bucket_f1_{k}")
+
     summary_rows.append({
         "dataset":          display,
         "accuracy":         round(m.get("accuracy",        0), 4),
@@ -159,8 +165,7 @@ for key, display in SOURCE_NAMES.items():
         "recognition_f1":   round(m.get("recognition_f1",  0) or 0, 4),
         "posterior_f1":     round(m.get("posterior_f1",    0) or 0, 4),
         "mean_surprise":    round(m.get("mean_surprise",   0), 4),
-        **{f"bucket_f1_{k}": round(v, 4)
-           for k, v in m.get("bucket_f1", {}).items()},
+        **{f"bucket_f1_{k}": round(v, 4) for k, v in bucket_f1.items()},
     })
 
     for emo, stats in m.get("per_emotion", {}).items():
@@ -173,10 +178,17 @@ for key, display in SOURCE_NAMES.items():
             "support":   int(stats.get("support",     0)),
         })
 
+# Fill missing bucket keys with 0 so all rows have the same columns
+base_cols = ["dataset","accuracy","weighted_f1","recognition_f1","posterior_f1","mean_surprise"]
+all_cols   = base_cols + sorted(all_bucket_keys)
+for r in summary_rows:
+    for col in all_cols:
+        r.setdefault(col, 0)
+
 # ── Summary table ──────────────────────────────────────────────────────────
 print("\n  Overall Metrics:")
 if summary_rows:
-    cols = list(summary_rows[0].keys())
+    cols = all_cols
     w = max(len(c) for c in cols)
     print("  " + "  ".join(f"{c:<{max(w,12)}}" for c in cols))
     print("  " + "  ".join("-" * max(w,12) for c in cols))
