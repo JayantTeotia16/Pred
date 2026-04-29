@@ -313,26 +313,38 @@ def prep_appraisal(out_dir: str, source: str = "all"):
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # Download combined CSV if not cached
-    cache_path = os.path.join(out_dir, "_appraisal_raw.csv")
+    # Shared cache under the parent data/appraisal directory to avoid re-downloading
+    shared_cache_dir = os.path.join(os.path.dirname(out_dir), "_cache")
+    os.makedirs(shared_cache_dir, exist_ok=True)
+    cache_path = os.path.join(shared_cache_dir, "appraisal_raw.csv")
     if not os.path.exists(cache_path):
         print(f"  Downloading appraisal dataset from GitHub ...")
         urllib.request.urlretrieve(APPRAISAL_CSV_URL, cache_path)
         print(f"  Saved to {cache_path}")
+    else:
+        print(f"  Using cached raw CSV: {cache_path}")
 
     df = pd.read_csv(cache_path)
     df.columns = [c.strip() for c in df.columns]
     print(f"  Loaded {len(df)} rows, columns: {list(df.columns)}")
 
-    # Filter by source dataset
+    # Always show what's in the dataset column so mismatches are obvious
+    if "dataset" in df.columns:
+        from collections import Counter
+        print(f"  dataset column values: {dict(Counter(df['dataset'].astype(str)).most_common())}")
+    if "Set" in df.columns:
+        from collections import Counter as C2
+        print(f"  Set column values:     {dict(C2(df['Set'].astype(str)).most_common())}")
+
+    # Filter by source — case-insensitive to handle variant spellings
     if source != "all":
-        valid_names = APPRAISAL_SOURCE_MAP.get(source, [source])
-        mask = df["dataset"].isin(valid_names)
+        valid_lower = {v.lower() for v in APPRAISAL_SOURCE_MAP.get(source, [source])}
+        mask = df["dataset"].astype(str).str.strip().str.lower().isin(valid_lower)
         df = df[mask].copy()
         print(f"  Filtered to source='{source}': {len(df)} rows")
         if len(df) == 0:
-            unique_sources = df["dataset"].unique().tolist() if "dataset" in df.columns else []
-            print(f"  [ERROR] No rows matched. Available dataset values: {unique_sources}")
+            print(f"  [ERROR] No rows matched source='{source}'. "
+                  f"Check dataset column values above.")
             return
 
     # Prefix Dialogue_ID with source to avoid collisions in 'all' mode
