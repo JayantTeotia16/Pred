@@ -38,7 +38,7 @@ def check(name, cond, msg=""):
     return cond
 
 
-def smoke_dataset(key, display, data_dir, run_kwargs, hf_only=False):
+def smoke_dataset(key, display, data_dir, run_kwargs, hf_only=False, prep_cmd=None):
     print(f"\n{'='*60}")
     print(f"  {display}")
     print(f"{'='*60}")
@@ -53,11 +53,13 @@ def smoke_dataset(key, display, data_dir, run_kwargs, hf_only=False):
             for f in ["train.csv", "val.csv", "test.csv"]
         )
         if needs_prep:
-            print(f"  {INFO} Running prep_data.py --dataset {key} ...")
-            ret = subprocess.run(
-                [sys.executable, "prep_data.py", "--dataset", key, "--out_dir", data_dir],
-                capture_output=False,
-            )
+            # prep_cmd overrides default args (e.g. appraisal needs --source flag)
+            if prep_cmd:
+                cmd = [sys.executable, "prep_data.py", "--dataset"] + prep_cmd + ["--out_dir", data_dir]
+            else:
+                cmd = [sys.executable, "prep_data.py", "--dataset", key, "--out_dir", data_dir]
+            print(f"  {INFO} Running: {' '.join(cmd)}")
+            ret = subprocess.run(cmd, capture_output=False)
             ok &= check("prep_data.py exit code", ret.returncode == 0,
                         f"exit {ret.returncode}")
             if ret.returncode != 0:
@@ -145,7 +147,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--datasets", nargs="+",
                         default=["multidialog", "emorynlp", "iemocap", "dailydialog", "meld"],
-                        choices=["multidialog", "emorynlp", "iemocap", "dailydialog", "meld"])
+                        choices=["multidialog", "emorynlp", "iemocap", "dailydialog", "meld",
+                                 "appraisal_meld", "appraisal_emorynlp",
+                                 "appraisal_dailydialog", "appraisal_all"])
     args = parser.parse_args()
 
     dataset_configs = {
@@ -217,16 +221,35 @@ def main():
                 ],
             },
         },
+        **{
+            f"appraisal_{src}": {
+                "display":  f"Appraisal-{src.title()}",
+                "data_dir": f"./data/appraisal/{src}",
+                "hf_only":  False,
+                "prep_cmd": ["appraisal", "--source", src],
+                "kwargs": {
+                    "hf_dataset_name": None,
+                    "local_data_dir":  f"./data/appraisal/{src}",
+                    "utterance_col":   "Utterance",
+                    "speaker_col":     "Speaker",
+                    "emotion_col":     "Emotion",
+                    "dialogue_id_col": "Dialogue_ID",
+                    "emotion_int_to_name": None,
+                },
+            }
+            for src in ["meld", "emorynlp", "dailydialog", "all"]
+        },
     }
 
     for key in args.datasets:
         cfg = dataset_configs[key]
         smoke_dataset(
-            key       = key,
-            display   = cfg["display"],
-            data_dir  = cfg["data_dir"] or "",
-            run_kwargs= cfg["kwargs"],
-            hf_only   = cfg["hf_only"],
+            key        = key,
+            display    = cfg["display"],
+            data_dir   = cfg["data_dir"] or "",
+            run_kwargs = cfg["kwargs"],
+            hf_only    = cfg["hf_only"],
+            prep_cmd   = cfg.get("prep_cmd"),
         )
 
     # ── Summary ───────────────────────────────────────────────────────────────

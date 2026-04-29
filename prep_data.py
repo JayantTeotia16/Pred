@@ -274,11 +274,124 @@ def prep_emorynlp(out_dir: str):
     print("  EmoryNLP prep done.")
 
 
+# ── Appraisal Theory Dataset ──────────────────────────────────────────────────
+# Combined CSV from https://github.com/shuiguolanzi397/Emotion-Prediction-Dataset
+# Contains MELD + EmoryNLP + DailyDialog filtered for appraisal-rich dialogues
+# (min 4 distinct emotions, min 2 emotion transitions per dialogue).
+#
+# Columns: Sr No., Is_Transition, Is_Appraisal_Driven, Utterance, Speaker,
+#          Emotion, Dialogue_ID, Utterance_ID, Set (train/dev/test),
+#          expectation, dataset, Moment_Utterance_ID
+#
+# Usage: prep_data.py --dataset appraisal --source meld   --out_dir ./data/appraisal_meld
+#        prep_data.py --dataset appraisal --source emorynlp --out_dir ./data/appraisal_emorynlp
+#        prep_data.py --dataset appraisal --source dailydialog --out_dir ./data/appraisal_dailydialog
+#        prep_data.py --dataset appraisal --source all    --out_dir ./data/appraisal_all
+
+APPRAISAL_CSV_URL = (
+    "https://raw.githubusercontent.com/shuiguolanzi397/"
+    "Emotion-Prediction-Dataset/main/data/DailyDialog_EmoryNLP_MELD_gpt4o_q1.csv"
+)
+
+# Map the dataset column values in the CSV to canonical source names
+APPRAISAL_SOURCE_MAP = {
+    "meld":        ["MELD", "meld"],
+    "emorynlp":    ["EmoryNLP", "emorynlp", "Emorynlp"],
+    "dailydialog": ["DailyDialog", "dailydialog", "Daily Dialog"],
+}
+
+
+def prep_appraisal(out_dir: str, source: str = "all"):
+    """
+    Download and split the appraisal theory combined CSV into train/val/test CSVs.
+
+    source: one of 'meld', 'emorynlp', 'dailydialog', 'all'
+    """
+    import urllib.request
+    import json
+    import pandas as pd
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Download combined CSV if not cached
+    cache_path = os.path.join(out_dir, "_appraisal_raw.csv")
+    if not os.path.exists(cache_path):
+        print(f"  Downloading appraisal dataset from GitHub ...")
+        urllib.request.urlretrieve(APPRAISAL_CSV_URL, cache_path)
+        print(f"  Saved to {cache_path}")
+
+    df = pd.read_csv(cache_path)
+    df.columns = [c.strip() for c in df.columns]
+    print(f"  Loaded {len(df)} rows, columns: {list(df.columns)}")
+
+    # Filter by source dataset
+    if source != "all":
+        valid_names = APPRAISAL_SOURCE_MAP.get(source, [source])
+        mask = df["dataset"].isin(valid_names)
+        df = df[mask].copy()
+        print(f"  Filtered to source='{source}': {len(df)} rows")
+        if len(df) == 0:
+            unique_sources = df["dataset"].unique().tolist() if "dataset" in df.columns else []
+            print(f"  [ERROR] No rows matched. Available dataset values: {unique_sources}")
+            return
+
+    # Prefix Dialogue_ID with source to avoid collisions in 'all' mode
+    df["Dialogue_ID"] = df["dataset"].astype(str).str.lower().str.replace(" ", "_") \
+                        + "_" + df["Dialogue_ID"].astype(str)
+
+    # Map Set column: dev → val
+    set_map = {"train": "train", "dev": "val", "test": "test",
+               "Train": "train", "Dev": "val", "Test": "test"}
+    df["_split"] = df["Set"].map(set_map).fillna("train")
+
+    all_rows = []
+    for split_name in ["train", "val", "test"]:
+        subset = df[df["_split"] == split_name].copy()
+        rows = []
+        for _, row in subset.iterrows():
+            emo = str(row["Emotion"]).strip().lower()
+            if emo in ("unknown", "other", "xxx", "oth"):
+                continue   # skip ambiguous labels
+            rows.append({
+                "Dialogue_ID":        str(row["Dialogue_ID"]),
+                "Utterance_ID":       str(row["Utterance_ID"]),
+                "Utterance":          str(row["Utterance"]).strip(),
+                "Speaker":            str(row["Speaker"]).strip(),
+                "Emotion":            emo,
+                "Is_Transition":      int(row.get("Is_Transition", 0)),
+                "Is_Appraisal_Driven":int(row.get("Is_Appraisal_Driven", 0)),
+            })
+
+        out_path = os.path.join(out_dir, f"{split_name}.csv")
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["Dialogue_ID", "Utterance_ID",
+                                                    "Utterance", "Speaker", "Emotion",
+                                                    "Is_Transition", "Is_Appraisal_Driven"])
+            writer.writeheader()
+            writer.writerows(rows)
+
+        total_convs = len(set(r["Dialogue_ID"] for r in rows))
+        from collections import Counter
+        emo_dist = Counter(r["Emotion"] for r in rows)
+        print(f"  {split_name}: {total_convs} dialogues, {len(rows)} utterances, "
+              f"{len(emo_dist)} emotions → {out_path}")
+        print(f"    top emotions: {dict(emo_dist.most_common(5))}")
+        all_rows.extend(rows)
+
+    unique_emos = sorted(set(r["Emotion"] for r in all_rows))
+    with open(os.path.join(out_dir, "emotion_map.json"), "w") as f:
+        json.dump({e: e for e in unique_emos}, f, indent=2)
+    print(f"  Appraisal ({source}) prep done. {len(unique_emos)} emotion classes: {unique_emos}")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--dataset",  required=True,
-                   choices=["dailydialog", "iemocap", "multidialog", "emorynlp"])
+                   choices=["dailydialog", "iemocap", "multidialog", "emorynlp", "appraisal"])
     p.add_argument("--out_dir",  required=True)
+    p.add_argument("--source",   default="all",
+                   choices=["meld", "emorynlp", "dailydialog", "all"],
+                   help="Which source dataset to extract (appraisal only)")
     args = p.parse_args()
 
     if args.dataset == "dailydialog":
@@ -289,3 +402,5 @@ if __name__ == "__main__":
         prep_multidialog(args.out_dir)
     elif args.dataset == "emorynlp":
         prep_emorynlp(args.out_dir)
+    elif args.dataset == "appraisal":
+        prep_appraisal(args.out_dir, source=args.source)
