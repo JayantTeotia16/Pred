@@ -14,8 +14,8 @@ import random
 import numpy as np
 import torch
 
-from config import ExperimentConfig, ModelConfig, DataConfig, TrainingConfig
-from data import build_dataloaders, ConversationDataset
+from config import ExperimentConfig
+from data import build_dataloaders
 from model import DispositionalPredictionModel
 from baseline import LLaMAClassifier
 from trainer import Trainer
@@ -50,14 +50,13 @@ def sanity_check(cfg: ExperimentConfig):
     cfg.model.transformer_heads       = 2
     cfg.model.transformer_layers      = 1
     cfg.model.speaker_context_dim     = 24
-    cfg.model.scene_state_dim         = 16
     cfg.model.num_emotions            = 7
     cfg.training.min_history_turns    = 1
 
     import torch.nn as nn
     from dispositional_module import (
         PerturbationEncoder, DynamicSpeakerContext,
-        CausalTransformerDynamics, FusionGate, SceneDynamicsField, PredictionHead,
+        CausalTransformerDynamics, EmotionLabelContext, PredictionHead,
     )
 
     # Mock LLaMA — returns (B*T, L, H) matching real encoder output
@@ -69,18 +68,14 @@ def sanity_check(cfg: ExperimentConfig):
     model = DispositionalPredictionModel.__new__(DispositionalPredictionModel)
     nn.Module.__init__(model)
     model.cfg = cfg.model
-    sd, E_  = cfg.model.dispositional_state_dim, cfg.model.num_emotions
-    sc      = cfg.model.scene_state_dim
+    sd, E_ = cfg.model.dispositional_state_dim, cfg.model.num_emotions
     model.llama_encoder    = MockLLaMA(cfg.model.llama_hidden_size)
     model.perturbation_enc = PerturbationEncoder(cfg.model.llama_hidden_size, cfg.model.perturbation_dim)
     model.speaker_context  = DynamicSpeakerContext(cfg.model)
+    model.label_context    = EmotionLabelContext(cfg.model)
     model.personal_dynamics= CausalTransformerDynamics(cfg.model)
-    model.scene_dynamics   = SceneDynamicsField(cfg.model)
-    model.prediction_head  = PredictionHead(sd, E_, sc)
-    model.future_head_1    = PredictionHead(sd, E_, sc)
-    model.future_head_2    = PredictionHead(sd, E_, sc)
-    model.fusion_gate      = FusionGate(sd, cfg.model.perturbation_dim)
-    model.posterior_head   = PredictionHead(sd, E_, sc)
+    model.prediction_head  = PredictionHead(sd, E_)
+    model.recognition_head = PredictionHead(cfg.model.perturbation_dim, E_)
 
     B, T, L, E = 2, 6, 10, 7
     emotion_ids = torch.randint(0, E, (B, T))
@@ -145,19 +140,13 @@ def main():
     parser.add_argument("--batch_size",  type=int,   default=4)
     parser.add_argument("--epochs",      type=int,   default=25)
     parser.add_argument("--device",      default="cuda")
-    parser.add_argument("--no_scene",    action="store_true")
     parser.add_argument("--no_lora",          action="store_true")
     parser.add_argument("--staged_training",  action="store_true")
     parser.add_argument("--baseline",         action="store_true")
     parser.add_argument("--output_dir",  default="./checkpoints")
     parser.add_argument("--analysis_dir",default="./analysis_outputs")
     # Loss weight overrides (default=None → use config.py values)
-    parser.add_argument("--posterior_loss_weight",    type=float, default=None)
     parser.add_argument("--recognition_loss_weight",  type=float, default=None)
-    parser.add_argument("--surprise_reg_weight",      type=float, default=None)
-    parser.add_argument("--contrastive_loss_weight",  type=float, default=None)
-    parser.add_argument("--future_pred_weight_1",     type=float, default=None)
-    parser.add_argument("--future_pred_weight_2",     type=float, default=None)
     parser.add_argument("--focal_gamma",              type=float, default=None)
     args = parser.parse_args()
 
@@ -171,7 +160,6 @@ def main():
         print(f"  LLaMA hidden size auto-detected: {cfg.model.llama_hidden_size}")
     except Exception:
         print(f"  LLaMA hidden size: {cfg.model.llama_hidden_size} (from config, detection failed)")
-    cfg.model.use_scene_dynamics = not args.no_scene
     cfg.model.use_lora             = not args.no_lora
     if args.baseline and args.staged_training:
         print("  [baseline] --staged_training ignored for baseline (no dispositional modules).")
@@ -181,12 +169,7 @@ def main():
     cfg.training.device          = args.device
     cfg.training.save_dir        = args.output_dir
 
-    if args.posterior_loss_weight   is not None: cfg.training.posterior_loss_weight   = args.posterior_loss_weight
     if args.recognition_loss_weight is not None: cfg.training.recognition_loss_weight = args.recognition_loss_weight
-    if args.surprise_reg_weight     is not None: cfg.training.surprise_reg_weight     = args.surprise_reg_weight
-    if args.contrastive_loss_weight is not None: cfg.training.contrastive_loss_weight = args.contrastive_loss_weight
-    if args.future_pred_weight_1    is not None: cfg.training.future_pred_weight_1    = args.future_pred_weight_1
-    if args.future_pred_weight_2    is not None: cfg.training.future_pred_weight_2    = args.future_pred_weight_2
     if args.focal_gamma             is not None: cfg.training.focal_gamma             = args.focal_gamma
 
     # Data config

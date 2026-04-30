@@ -4,16 +4,14 @@ model.py — Universal Dispositional Prediction Model.
 Forward pass (per turn t):
 
     BEFORE seeing utterance t:
-        c_t  = speaker_context[active_speaker]   ← built from their past turns
-        s(t) = ODE_step(s(t-1), c_t, δu_{t-1})  ← uses PAST perturbation
-        logits_t = PredictionHead(s(t), scene_s) ← pure prior, zero leakage
+        c_t      = speaker_context[active_speaker]   ← built from their past turns
+        s(t)     = CausalTransformer(δu_{0:t-1}, c_{0:t-1})  ← strictly causal
+        logits_t = PredictionHead(s(t))              ← pure prior, zero leakage
 
     AFTER storing the prediction:
         hidden_t = LLaMA(utterance_t)            ← encode current utterance
         δu_t     = PerturbationEncoder(hidden_t)
-        scene_influence = SceneDynamics(scene_s, s(t))
-        δu_t_final = δu_t + scene_influence
-        speaker_context = GRU_update(speaker_context, δu_t_final, active_speaker)
+        speaker_context = GRU_update(speaker_context, δu_t, active_speaker)
         → ready for next turn
 
 No global speaker vocabulary. All speaker personalisation is
@@ -32,10 +30,7 @@ from dispositional_module import (
     DynamicSpeakerContext,
     EmotionLabelContext,
     CausalTransformerDynamics,
-    FusionGate,
-    SceneDynamicsField,
     PredictionHead,
-    SIGReg,
 )
 
 
@@ -127,29 +122,9 @@ class DispositionalPredictionModel(nn.Module):
         self.speaker_context    = DynamicSpeakerContext(cfg)
         self.label_context      = EmotionLabelContext(cfg)
         self.personal_dynamics  = CausalTransformerDynamics(cfg)
-        self.scene_dynamics     = SceneDynamicsField(cfg) if cfg.use_scene_dynamics else None
 
-        scene_dim = cfg.scene_state_dim if cfg.use_scene_dynamics else 0
-
-        # Primary prior head
-        self.prediction_head  = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
-
-        # Auxiliary: multi-step future prediction heads (training only)
-        self.future_head_1    = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
-        self.future_head_2    = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
-
-        # Prior + posterior fusion
-        self.fusion_gate      = FusionGate(cfg.dispositional_state_dim, cfg.perturbation_dim)
-        self.posterior_head   = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions, scene_dim)
-
-        # SIGReg — Gaussian regulariser on dispositional state space
-        self.sigreg           = SIGReg(n_projections=256)
-
-        # JEPA predictor: s(t) → ẑ_{t+1} in perturbation space
-        self.jepa_predictor   = nn.Linear(cfg.dispositional_state_dim, cfg.perturbation_dim)
-
-        # Recognition head: δu(t) only → emotion (no history, utterance-only baseline)
-        self.recognition_head = PredictionHead(cfg.perturbation_dim, cfg.num_emotions, 0)
+        self.prediction_head  = PredictionHead(cfg.dispositional_state_dim, cfg.num_emotions)
+        self.recognition_head = PredictionHead(cfg.perturbation_dim, cfg.num_emotions)
 
 
     # ── Forward ────────────────────────────────────────────────────────────
@@ -160,7 +135,6 @@ class DispositionalPredictionModel(nn.Module):
           Phase 1 — batched LLaMA encode + perturbation (B*T, L)
           Phase 2 — GRU speaker context pass (fast, T steps)
           Phase 3 — causal transformer → dispositional states (batched)
-          Phase 4 — lightweight turn loop for scene dynamics + surprise
 
         Strictly causal: predicting emotion at turn t uses only turns 0..t-1.
         """
@@ -236,41 +210,14 @@ class DispositionalPredictionModel(nn.Module):
             all_delta_u, all_spk_ctx, all_label_ctx, all_prev_spk_emo, valid_mask, speaker_ids
         )
 
-        # ── JEPA auxiliary loss — predict next δu from current state ─────────
-        jepa_pred   = self.jepa_predictor(disp_states[:, :-1])
-        jepa_target = all_delta_u[:, 1:].detach()
-        jepa_mse    = F.mse_loss(jepa_pred, jepa_target, reduction="none").mean(-1)
-        jepa_mask   = valid_mask[:, 1:].float()
-        jepa_loss   = (jepa_mse * jepa_mask).sum() / jepa_mask.sum().clamp(min=1)
-
-        # ── Phase 4a: scene states — must be sequential (each step depends on prev) ──
-        if self.scene_dynamics is not None:
-            scene_list = []
-            scene_s    = self.scene_dynamics.initial_state(B, device)
-            for t in range(T):
-                scene_list.append(scene_s)
-                if t < T - 1:
-                    scene_s_new = self.scene_dynamics.step(scene_s, disp_states[:, t])
-                    scene_s = torch.where(
-                        valid_mask[:, t].unsqueeze(-1), scene_s_new, scene_s
-                    )
-            scene_states = torch.stack(scene_list, dim=1)   # (B, T, Ds)
-        else:
-            scene_states = None
-
-        # ── Phase 4b: batched predictions — 4 head calls instead of 4*T ──────
+        # ── Batched predictions ───────────────────────────────────────────────
         s_flat  = disp_states.view(B * T, -1)
         du_flat = all_delta_u.view(B * T, -1)
-        sc_flat = scene_states.view(B * T, -1) if scene_states is not None else None
 
-        prior_logits  = self.prediction_head(s_flat, sc_flat).view(B, T, -1)
-        fut1_logits   = self.future_head_1(s_flat, sc_flat).view(B, T, -1)
-        fut2_logits   = self.future_head_2(s_flat, sc_flat).view(B, T, -1)
-        s_post_flat   = self.fusion_gate(s_flat, du_flat)
-        post_logits   = self.posterior_head(s_post_flat, sc_flat).view(B, T, -1)
-        recog_logits  = self.recognition_head(du_flat.detach(), None).view(B, T, -1)
+        prior_logits = self.prediction_head(s_flat).view(B, T, -1)
+        recog_logits = self.recognition_head(du_flat.detach()).view(B, T, -1)
 
-        # ── Phase 4c: vectorized surprise (KL between consecutive priors) ─────
+        # ── Surprise metric: KL between consecutive prior distributions ───────
         p = F.softmax(prior_logits, dim=-1).clamp(min=1e-9)
         kl = F.kl_div(
             p[:, :-1].log(), p[:, 1:].clamp(min=1e-9), reduction="none"
@@ -280,15 +227,10 @@ class DispositionalPredictionModel(nn.Module):
         ) * valid_mask.float()
 
         return {
-            "prediction_logits":    prior_logits,                        # (B, T, E)
-            "posterior_logits":     post_logits,                         # (B, T, E)
-            "recognition_logits":   recog_logits,                        # (B, T, E)
-            "future_logits_1":      fut1_logits,                         # (B, T, E)
-            "future_logits_2":      fut2_logits,                         # (B, T, E)
-            "dispositional_states": disp_states,                         # (B, T, D)
-            "surprise":             surprise,                            # (B, T)
-            "sigreg_loss":          self.sigreg(disp_states.view(B * T, -1)),
-            "jepa_loss":            jepa_loss,
+            "prediction_logits":    prior_logits,     # (B, T, E)
+            "recognition_logits":   recog_logits,     # (B, T, E)
+            "dispositional_states": disp_states,      # (B, T, D)
+            "surprise":             surprise,          # (B, T)
             "speaker_contexts":     all_spk_ctx,
             "speaker_ids":          speaker_ids,
             "emotion_ids":          emotion_ids,
@@ -322,12 +264,7 @@ class DispositionalPredictionModel(nn.Module):
         print("  LoRA unfrozen — joint training.")
 
     def rebuild_prediction_head(self, num_emotions: int):
-        """Rebuild all prediction heads when switching datasets."""
-        scene_dim = self.cfg.scene_state_dim if self.cfg.use_scene_dynamics else 0
-        sd        = self.cfg.dispositional_state_dim
-        self.prediction_head  = PredictionHead(sd, num_emotions, scene_dim)
-        self.future_head_1    = PredictionHead(sd, num_emotions, scene_dim)
-        self.future_head_2    = PredictionHead(sd, num_emotions, scene_dim)
-        self.posterior_head   = PredictionHead(sd, num_emotions, scene_dim)
-        self.recognition_head = PredictionHead(self.cfg.perturbation_dim, num_emotions, 0)
+        """Rebuild prediction heads when switching datasets."""
+        self.prediction_head  = PredictionHead(self.cfg.dispositional_state_dim, num_emotions)
+        self.recognition_head = PredictionHead(self.cfg.perturbation_dim, num_emotions)
         self.cfg.num_emotions = num_emotions

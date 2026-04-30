@@ -62,11 +62,6 @@ run_dataset() {
     --device        "$DEVICE"      \
     --output_dir    "$out_dir"     \
     --staged_training              \
-    --posterior_loss_weight  0.0   \
-    --surprise_reg_weight    0.0   \
-    --contrastive_loss_weight 0.0  \
-    --future_pred_weight_1   0.0   \
-    --future_pred_weight_2   0.0   \
     "$@" 2>&1 | tee "$log_file" || exit_code=$?
 
   if [[ $exit_code -ne 0 ]]; then
@@ -175,7 +170,6 @@ for key, display in DATASET_NAMES.items():
         "accuracy":       round(m.get("accuracy",       0), 4),
         "weighted_f1":    round(m.get("weighted_f1",    0), 4),
         "recognition_f1": round(m.get("recognition_f1", 0) or 0, 4),
-        "posterior_f1":   round(m.get("posterior_f1",   0) or 0, 4),
         "mean_surprise":  round(m.get("mean_surprise",  0), 4),
         **{f"bucket_f1_{k}": round(v, 4)
            for k, v in m.get("bucket_f1", {}).items()},

@@ -6,49 +6,15 @@ Architecture:
     DynamicSpeakerContext      per-speaker GRU → speaker context c ∈ ℝ^D
     CausalTransformerDynamics  causally-masked transformer over
                                (δu, c, cross_ctx) history → s(t)
-                               cross_ctx = mean δu from OTHER speakers (SRA)
-    FusionGate                 s_prior(t) + δu_t → s_posterior(t)
-    SceneDynamicsField         shared scene-level ODE (co-regulation)
-    PredictionHead             s(t) [+ scene_s] → emotion logits
+                               cross_ctx = OTHER speakers' past δu (CrossSpeakerAttention)
+    PredictionHead             s(t) → emotion logits
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Optional
 
 from config import ModelConfig
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# SIGReg — Gaussian regulariser on dispositional state space (from LeWM)
-# ──────────────────────────────────────────────────────────────────────────────
-
-class SIGReg(nn.Module):
-    """
-    Enforces that the distribution of dispositional states across a batch
-    matches an isotropic Gaussian, preventing state-space collapse.
-
-    Method (Cramér-Wold theorem): if all 1D projections of a distribution
-    are Gaussian, the full distribution is Gaussian. We project states onto
-    M random unit directions and penalise deviation from N(0,1) per projection.
-
-    Loss = mean over projections of [μ² + (σ - 1)²]
-    Where μ, σ are mean and std of the projected values.
-    """
-
-    def __init__(self, n_projections: int = 256):
-        super().__init__()
-        self.M = n_projections
-
-    def forward(self, Z: torch.Tensor) -> torch.Tensor:
-        # Z: (N, d) — flattened dispositional states from a batch
-        d = Z.shape[1]
-        u = F.normalize(torch.randn(d, self.M, device=Z.device), dim=0)  # (d, M)
-        proj  = Z.float() @ u                          # (N, M)
-        mu    = proj.mean(0)                            # (M,)
-        sigma = proj.std(0).clamp(min=1e-6)             # (M,)
-        return (mu.pow(2) + (sigma - 1.0).pow(2)).mean()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -306,64 +272,6 @@ class CausalTransformerDynamics(nn.Module):
         states[:, 1:] = out[:, :-1]
         states[:, 0]  = self.initial_state.unsqueeze(0).expand(B, -1)
         return states
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Fusion Gate  —  prior + utterance → posterior
-# ──────────────────────────────────────────────────────────────────────────────
-
-class FusionGate(nn.Module):
-    """
-    Combines the dispositional prior s(t) with the current utterance δu_t
-    to produce a posterior state s'(t).
-
-        gate    = σ(W · cat(s_prior, δu))
-        s_post  = gate ⊙ s_prior + (1−gate) ⊙ proj(δu)
-
-    The gate learns how much to update the prior based on the utterance.
-    Interpretable: high gate value = utterance confirms prior expectations;
-    low gate value = utterance is a surprise, posterior departs from prior.
-    """
-
-    def __init__(self, state_dim: int, perturbation_dim: int):
-        super().__init__()
-        self.gate = nn.Sequential(
-            nn.Linear(state_dim + perturbation_dim, state_dim),
-            nn.Sigmoid(),
-        )
-        self.proj = nn.Linear(perturbation_dim, state_dim)
-
-    def forward(self, s_prior: torch.Tensor, delta_u: torch.Tensor) -> torch.Tensor:
-        gate   = self.gate(torch.cat([s_prior, delta_u], dim=-1))
-        return gate * s_prior + (1.0 - gate) * self.proj(delta_u)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Scene Dynamics Field
-# ──────────────────────────────────────────────────────────────────────────────
-
-class SceneDynamicsField(nn.Module):
-    """Shared scene-level ODE capturing collective emotional atmosphere."""
-
-    def __init__(self, cfg: ModelConfig):
-        super().__init__()
-        self.state_dim = cfg.scene_state_dim
-        self.scene_ode = nn.Sequential(
-            nn.Linear(cfg.scene_state_dim + cfg.dispositional_state_dim, 128),
-            nn.Tanh(),
-            nn.Linear(128, cfg.scene_state_dim),
-        )
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=0.01)
-                nn.init.zeros_(m.bias)
-
-    def initial_state(self, B: int, device: torch.device) -> torch.Tensor:
-        return torch.zeros(B, self.state_dim, device=device)
-
-    def step(self, scene_s: torch.Tensor, speaker_s: torch.Tensor, dt: float = 1.0) -> torch.Tensor:
-        ds = self.scene_ode(torch.cat([scene_s, speaker_s], dim=-1))
-        return scene_s + dt * ds
 
 
 # ──────────────────────────────────────────────────────────────────────────────

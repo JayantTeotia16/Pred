@@ -8,13 +8,11 @@ Speaker names are used only for display in per-character analysis
 
 import os
 import json
-from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
@@ -29,80 +27,25 @@ from model import DispositionalPredictionModel
 # Loss
 # ──────────────────────────────────────────────────────────────────────────────
 
-def contrastive_speaker_loss(
-    speaker_contexts: torch.Tensor,  # (B, T, D)
-    speaker_ids: torch.Tensor,       # (B, T)
-    valid_mask: torch.Tensor,        # (B, T) bool
-    temperature: float = 0.1,
-) -> torch.Tensor:
-    """
-    Supervised contrastive loss on speaker context vectors.
-    Pulls together turns from the same speaker; pushes apart different speakers.
-    Operates within each conversation (no cross-conversation negatives).
-    """
-    B, T, D = speaker_contexts.shape
-    device  = speaker_contexts.device
-    loss    = torch.tensor(0.0, device=device)
-    count   = 0
-
-    for b in range(B):
-        mask = valid_mask[b]              # (T,)
-        vecs = speaker_contexts[b][mask]  # (N, D)
-        spks = speaker_ids[b][mask]       # (N,)
-        N    = vecs.shape[0]
-        if N < 2:
-            continue
-
-        vecs = F.normalize(vecs.float(), dim=-1)
-        sim  = vecs @ vecs.T / temperature                         # (N, N)
-        eye  = torch.eye(N, dtype=torch.bool, device=device)
-        pos  = (spks.unsqueeze(0) == spks.unsqueeze(1)) & ~eye    # same speaker
-
-        if not pos.any():
-            continue
-
-        # log-softmax denominator over all non-self pairs
-        sim_masked = sim.masked_fill(eye, float("-inf"))
-        log_denom  = torch.logsumexp(sim_masked, dim=-1, keepdim=True)  # (N, 1)
-        log_prob   = sim - log_denom                                      # (N, N)
-
-        loss  += -(log_prob * pos.float()).sum() / pos.float().sum()
-        count += 1
-
-    return loss / max(count, 1)
-
 
 class PredictionLoss(nn.Module):
     """
     L = w_pred  · CE(prior_logits,     labels)
-      + w_post  · CE(posterior_logits, labels)
-      + w_fut1  · CE(future_logits_1,  labels_shifted_+1)
-      + w_fut2  · CE(future_logits_2,  labels_shifted_+2)
-      + w_surp  · surprise_calibration_reg
-      + w_cont  · contrastive_speaker_loss
+      + w_recog · CE(recognition_logits, labels)   (utterance-only baseline)
     """
 
     def __init__(self, cfg: TrainingConfig):
         super().__init__()
-        self.w_pred   = cfg.prediction_loss_weight
-        self.w_surp   = cfg.surprise_reg_weight
-        self.w_cont   = cfg.contrastive_loss_weight
-        self.w_post   = cfg.posterior_loss_weight
-        self.w_recog  = cfg.recognition_loss_weight
-        self.w_fut1   = cfg.future_pred_weight_1
-        self.w_fut2   = cfg.future_pred_weight_2
-        self.w_sig    = cfg.sigreg_loss_weight
-        self.w_jepa   = cfg.jepa_loss_weight
-        self.cont_tmp = cfg.contrastive_temperature
-        self.min_hist = cfg.min_history_turns
+        self.w_pred      = cfg.prediction_loss_weight
+        self.w_recog     = cfg.recognition_loss_weight
+        self.min_hist    = cfg.min_history_turns
         self.focal_gamma = cfg.focal_gamma
-        self.ce       = nn.CrossEntropyLoss(
+        self.ce          = nn.CrossEntropyLoss(
             ignore_index=-1, reduction="none",
             label_smoothing=cfg.label_smoothing,
         )
 
     def _focal_weight(self, ce_loss: torch.Tensor) -> torch.Tensor:
-        """Focal weight: (1 - exp(-ce))^gamma. Downweights easy (low-loss) examples."""
         if self.focal_gamma == 0:
             return torch.ones_like(ce_loss)
         return (1.0 - torch.exp(-ce_loss.detach())) ** self.focal_gamma
@@ -110,97 +53,35 @@ class PredictionLoss(nn.Module):
     def _masked_ce(self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         B, T, E = logits.shape
         loss = self.ce(logits.view(B * T, E), labels.view(B * T)).view(B, T)
-        n    = mask.sum().clamp(min=1)
-        return (loss * mask).sum() / n
+        return (loss * mask).sum() / mask.sum().clamp(min=1)
 
     def forward(self, outputs: Dict) -> Tuple[torch.Tensor, Dict]:
-        logits_prior = outputs["prediction_logits"]          # (B, T, E)
-        logits_post  = outputs.get("posterior_logits")       # (B, T, E) or None
-        logits_fut1  = outputs.get("future_logits_1")        # (B, T, E) or None
-        logits_fut2  = outputs.get("future_logits_2")        # (B, T, E) or None
-        labels       = outputs["emotion_ids"]                 # (B, T)
-        surprise     = outputs["surprise"]                    # (B, T)
-        spk_ctx      = outputs["speaker_contexts"]            # (B, T, D)
-        spk_ids      = outputs.get("speaker_ids")
+        logits_prior = outputs["prediction_logits"]   # (B, T, E)
+        logits_recog = outputs.get("recognition_logits")
+        labels       = outputs["emotion_ids"]          # (B, T)
         B, T, E      = logits_prior.shape
         device       = logits_prior.device
 
-        # Standard validity mask (padding + cold-start)
         valid = (labels >= 0).float()
         if self.min_hist > 0:
             cold = torch.ones(B, T, device=device)
             cold[:, :self.min_hist] = 0.0
             valid = valid * cold
 
-        # ── Prior loss (focal + label smoothing) ─────────────────────────
         pred_loss = self.ce(logits_prior.view(B*T, E), labels.view(B*T)).view(B, T)
         focal_w   = self._focal_weight(pred_loss)
-        n         = valid.sum().clamp(min=1)
-        L_pred    = (pred_loss * focal_w * valid).sum() / n
+        L_pred    = (pred_loss * focal_w * valid).sum() / valid.sum().clamp(min=1)
 
-        # ── Surprise calibration ──────────────────────────────────────────
-        surprise = torch.nan_to_num(surprise, nan=0.0)
-        surp_reg = surprise * (1.0 - torch.exp(-pred_loss.detach()))
-        L_surp   = (surp_reg * valid).sum() / n
-
-        # ── Posterior loss ────────────────────────────────────────────────
-        L_post = self._masked_ce(logits_post, labels, valid) \
-                 if logits_post is not None and self.w_post > 0 \
-                 else torch.tensor(0.0, device=device)
-
-        # ── Recognition loss (utterance-only head, no cold-start mask) ───
-        logits_recog = outputs.get("recognition_logits")
         L_recog = self._masked_ce(logits_recog, labels, (labels >= 0).float()) \
                   if logits_recog is not None and self.w_recog > 0 \
                   else torch.tensor(0.0, device=device)
 
-        # ── Future prediction losses (shifted labels, padding-only mask) ──
-        pad_valid = (labels >= 0).float()   # no cold-start for auxiliary task
-
-        if logits_fut1 is not None and self.w_fut1 > 0:
-            fut1_labels        = torch.full_like(labels, -1)
-            fut1_labels[:, :-1] = labels[:, 1:]
-            fut1_mask           = pad_valid * (fut1_labels >= 0).float()
-            L_fut1 = self._masked_ce(logits_fut1, fut1_labels, fut1_mask)
-        else:
-            L_fut1 = torch.tensor(0.0, device=device)
-
-        if logits_fut2 is not None and self.w_fut2 > 0:
-            fut2_labels        = torch.full_like(labels, -1)
-            fut2_labels[:, :-2] = labels[:, 2:]
-            fut2_mask           = pad_valid * (fut2_labels >= 0).float()
-            L_fut2 = self._masked_ce(logits_fut2, fut2_labels, fut2_mask)
-        else:
-            L_fut2 = torch.tensor(0.0, device=device)
-
-        # ── Contrastive speaker loss ──────────────────────────────────────
-        if spk_ids is not None and self.w_cont > 0:
-            L_cont = contrastive_speaker_loss(spk_ctx, spk_ids, valid.bool(), self.cont_tmp)
-        else:
-            L_cont = torch.tensor(0.0, device=device)
-
-        # ── SIGReg — Gaussian regulariser on dispositional state space ────
-        L_sig  = outputs.get("sigreg_loss", torch.tensor(0.0, device=device))
-
-        # ── JEPA — predict next utterance embedding from s(t) ────────────
-        L_jepa = outputs.get("jepa_loss",   torch.tensor(0.0, device=device))
-
-        total = (self.w_pred * L_pred + self.w_surp * L_surp +
-                 self.w_post * L_post + self.w_recog * L_recog +
-                 self.w_fut1 * L_fut1 + self.w_fut2 * L_fut2 +
-                 self.w_cont * L_cont + self.w_sig * L_sig + self.w_jepa * L_jepa)
+        total = self.w_pred * L_pred + self.w_recog * L_recog
 
         return total, {
-            "loss_total":       total.item(),
-            "loss_pred":        L_pred.item(),
-            "loss_post":        L_post.item(),
-            "loss_recog":       L_recog.item(),
-            "loss_fut1":        L_fut1.item(),
-            "loss_fut2":        L_fut2.item(),
-            "loss_surprise":    L_surp.item(),
-            "loss_contrastive": L_cont.item(),
-            "loss_sigreg":      L_sig.item(),
-            "loss_jepa":        L_jepa.item(),
+            "loss_total": total.item(),
+            "loss_pred":  L_pred.item(),
+            "loss_recog": L_recog.item(),
         }
 
 
@@ -280,9 +161,7 @@ class Trainer:
             labels = batch["emotion_ids"]
             for c in range(self.model.cfg.num_emotions):
                 counts[c] += (labels == c).sum().item()
-        for head in [self.model.prediction_head, self.model.future_head_1,
-                     self.model.future_head_2, self.model.posterior_head,
-                     self.model.recognition_head]:
+        for head in [self.model.prediction_head, self.model.recognition_head]:
             head.set_prior(counts)
         print(f"  Head priors set — counts: {counts.long().tolist()}")
 
@@ -382,10 +261,7 @@ class Trainer:
             bar.set_postfix(
                 loss=f"{loss_dict['loss_total']:.4f}",
                 pred=f"{loss_dict['loss_pred']:.4f}",
-                post=f"{loss_dict['loss_post']:.4f}",
-                sig=f"{loss_dict['loss_sigreg']:.4f}",
-                jepa=f"{loss_dict['loss_jepa']:.4f}",
-                cont=f"{loss_dict['loss_contrastive']:.4f}",
+                recog=f"{loss_dict['loss_recog']:.4f}",
                 lr=f"{self.scheduler.get_last_lr()[0]:.2e}",
             )
 
@@ -400,7 +276,7 @@ class Trainer:
     @torch.no_grad()
     def evaluate(self, loader: DataLoader, split: str = "val") -> Dict:
         self.model.eval()
-        all_prior, all_post, all_labels, all_turns = [], [], [], []
+        all_prior, all_labels, all_turns = [], [], []
         all_recog_preds, all_recog_labels = [], []
         all_surprise = []
 
@@ -413,11 +289,6 @@ class Trainer:
 
             p, l, t = collect_predictions(outputs, self.cfg.min_history_turns)
             all_prior.extend(p); all_labels.extend(l); all_turns.extend(t)
-
-            if "posterior_logits" in outputs:
-                out_post = {**outputs, "prediction_logits": outputs["posterior_logits"]}
-                p_post, _, _ = collect_predictions(out_post, self.cfg.min_history_turns)
-                all_post.extend(p_post)
 
             # Recognition: utterance-only head, no cold-start (every valid turn counts)
             if "recognition_logits" in outputs:
@@ -436,8 +307,6 @@ class Trainer:
         all_turns  = np.array(all_turns)
 
         wf1_prior = f1_score(all_labels, all_prior, average="weighted", zero_division=0)
-        wf1_post  = f1_score(all_labels, np.array(all_post), average="weighted", zero_division=0) \
-                    if all_post else None
         wf1_recog = f1_score(np.array(all_recog_labels), np.array(all_recog_preds),
                              average="weighted", zero_division=0) \
                     if all_recog_preds else None
@@ -471,9 +340,6 @@ class Trainer:
         if wf1_recog is not None:
             gap = wf1_recog - wf1_prior
             print(f"  Recognition F1: {wf1_recog:.4f}  (gap vs prior {gap:+.4f})")
-        if wf1_post is not None:
-            gap = wf1_post - wf1_prior
-            print(f"  Posterior F1  : {wf1_post:.4f}  (gap vs prior {gap:+.4f})")
         print(f"  Accuracy      : {acc:.4f}")
         print(f"  Mean Surprise : {np.mean(all_surprise):.4f}")
         print(f"  F1 by history : {bucket_f1}")
@@ -489,13 +355,12 @@ class Trainer:
 
         if split == "test":
             metrics_out = {
-                "weighted_f1":     wf1_prior,
-                "recognition_f1":  wf1_recog,
-                "posterior_f1":    wf1_post,
-                "accuracy":        acc,
-                "mean_surprise":   float(np.mean(all_surprise)),
-                "bucket_f1":       bucket_f1,
-                "per_emotion":     per_emotion,
+                "weighted_f1":   wf1_prior,
+                "recognition_f1": wf1_recog,
+                "accuracy":      acc,
+                "mean_surprise": float(np.mean(all_surprise)),
+                "bucket_f1":     bucket_f1,
+                "per_emotion":   per_emotion,
             }
             out_path = os.path.join(self.cfg.save_dir, "test_metrics.json")
             with open(out_path, "w") as f:
@@ -505,7 +370,6 @@ class Trainer:
         return {
             f"{split}_wf1":           wf1_prior,
             f"{split}_recog_wf1":     wf1_recog,
-            f"{split}_post_wf1":      wf1_post,
             f"{split}_accuracy":      acc,
             f"{split}_mean_surprise": float(np.mean(all_surprise)),
             f"{split}_bucket_f1":     bucket_f1,

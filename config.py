@@ -44,10 +44,6 @@ class ModelConfig:
     speaker_context_dim: int    = 64   # GRU hidden dim per speaker
     speaker_context_layers: int = 1    # GRU depth
 
-    # Scene dynamics (shared affective field across all speakers)
-    use_scene_dynamics: bool = True
-    scene_state_dim: int     = 32
-
     # Emotion label conditioning (options 1 & 2)
     emotion_label_embed_dim: int = 16   # embedding dim for past emotion labels
     label_context_dim: int       = 32   # hidden dim of per-speaker emotion-label GRU
@@ -117,22 +113,8 @@ class TrainingConfig:
     focal_gamma: float             = 0.0   # focal loss: 0 = standard CE, 2 = standard focal
     label_smoothing: float         = 0.0   # label smoothing (0 = disabled)
     prediction_loss_weight: float  = 1.0
-    surprise_reg_weight: float     = 0.5
-    contrastive_loss_weight: float = 0.01
-    sigreg_loss_weight: float      = 0.0    # Gaussian regulariser on dispositional states
-    jepa_loss_weight: float        = 0.0    # JEPA: predict next utterance embedding from s(t)
-    contrastive_temperature: float = 0.1
+    recognition_loss_weight: float = 1.0   # CE on recognition head (utterance-only baseline)
     min_history_turns: int         = 1
-
-    # Multi-step future prediction (auxiliary training heads)
-    future_pred_weight_1: float = 0.3   # predict e(t+1) from s(t)
-    future_pred_weight_2: float = 0.1   # predict e(t+2) from s(t)
-
-    # Prior + posterior fusion
-    posterior_loss_weight: float = 0.5  # CE on posterior head during training
-
-    # Recognition head (utterance-only, no history) — comparison baseline
-    recognition_loss_weight: float = 1.0  # CE on recognition head during training
 
     max_conversation_length: int   = 30
 

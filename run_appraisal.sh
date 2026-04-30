@@ -88,11 +88,6 @@ run_appraisal_dataset() {
     --device        "$DEVICE"      \
     --output_dir    "$out_dir"     \
     --staged_training              \
-    --posterior_loss_weight  0.0   \
-    --surprise_reg_weight    0.0   \
-    --contrastive_loss_weight 0.0  \
-    --future_pred_weight_1   0.0   \
-    --future_pred_weight_2   0.0   \
     --local_data      "$data_dir"  \
     --utterance_col   "Utterance"  \
     --speaker_col     "Speaker"    \
@@ -163,7 +158,6 @@ for key, display in SOURCE_NAMES.items():
         "accuracy":         round(m.get("accuracy",        0), 4),
         "weighted_f1":      round(m.get("weighted_f1",     0), 4),
         "recognition_f1":   round(m.get("recognition_f1",  0) or 0, 4),
-        "posterior_f1":     round(m.get("posterior_f1",    0) or 0, 4),
         "mean_surprise":    round(m.get("mean_surprise",   0), 4),
         **{f"bucket_f1_{k}": round(v, 4) for k, v in bucket_f1.items()},
     })
@@ -179,7 +173,7 @@ for key, display in SOURCE_NAMES.items():
         })
 
 # Fill missing bucket keys with 0 so all rows have the same columns
-base_cols = ["dataset","accuracy","weighted_f1","recognition_f1","posterior_f1","mean_surprise"]
+base_cols = ["dataset","accuracy","weighted_f1","recognition_f1","mean_surprise"]
 all_cols   = base_cols + sorted(all_bucket_keys)
 for r in summary_rows:
     for col in all_cols:
