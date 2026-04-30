@@ -90,15 +90,18 @@ if os.path.isfile(metrics_path):
 
 if os.path.isfile(gate_path):
     g = json.load(open(gate_path))
-    print(f"\n  Counterfactual Gate Analysis:")
-    print(f"  Mean autonomy          : {g.get('mean_autonomy','N/A'):.4f}")
-    print(f"  Gate @ stable turns    : {g.get('gate_at_stable','N/A'):.4f}")
-    print(f"  Gate @ transitions     : {g.get('gate_at_transition','N/A'):.4f}")
-    drop = g.get('autonomy_drop_at_transition')
-    if drop is not None:
-        print(f"  Autonomy drop          : {drop:.4f}  ({'reactive ↑ at transitions' if drop > 0 else 'no clear pattern'})")
-    print(f"\n  Per-speaker autonomy:")
-    for spk, val in g.get("per_speaker_autonomy", {}).items():
+    print(f"\n  Reactivity Head Analysis:")
+    print(f"  AUROC                      : {g.get('auroc', 'N/A')}")
+    print(f"  F1 (transition class)      : {g.get('f1_transition_class', 'N/A')}")
+    print(f"  Mean reactivity            : {g.get('mean_reactivity', 'N/A')}")
+    print(f"  Reactivity @ transitions   : {g.get('reactivity_at_transition', 'N/A')}")
+    print(f"  Reactivity @ stable        : {g.get('reactivity_at_stable', 'N/A')}")
+    lift = g.get('reactivity_lift_at_transition')
+    if lift is not None:
+        direction = 'reactive ↑ at transitions' if lift > 0 else 'no clear pattern'
+        print(f"  Reactivity lift            : {lift:.4f}  ({direction})")
+    print(f"\n  Per-speaker reactivity:")
+    for spk, val in g.get("per_speaker_reactivity", {}).items():
         bar = "█" * int(val * 20)
         print(f"    Speaker {spk}: {val:.4f}  {bar}")
 PYEOF
