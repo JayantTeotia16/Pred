@@ -29,7 +29,7 @@ cd "$SCRIPT_DIR"
 # ── Parse flags ───────────────────────────────────────────────────────────────
 DEVICE="cuda"
 BATCH_SIZE=4
-LLAMA_MODEL="meta-llama/Llama-3.2-1B"
+LLAMA_MODEL="meta-llama/Llama-3.1-8B"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
