@@ -53,9 +53,9 @@ class V3PredictionLoss(PredictionLoss):
         total, breakdown = super().forward(outputs)
 
         if self.w_future > 0 and "future_logits" in outputs:
-            fut_logits = outputs["future_logits"]   # (B, T-1, E)
-            fut_labels = outputs["future_labels"]   # (B, T-1)
-            fut_valid  = outputs["future_valid"]    # (B, T-1) bool
+            fut_logits = outputs["future_logits"].contiguous()   # (B, T-1, E)
+            fut_labels = outputs["future_labels"].contiguous()   # (B, T-1)
+            fut_valid  = outputs["future_valid"].contiguous()    # (B, T-1) bool
             L_future = self._masked_ce(fut_logits, fut_labels, fut_valid.float())
             total = total + self.w_future * L_future
             breakdown["loss_future"] = L_future.item()
