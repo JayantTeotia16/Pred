@@ -2,11 +2,15 @@
 # =============================================================================
 # run_all_datasets.sh — Train and evaluate on MELD, DailyDialog, IEMOCAP
 #
-# Each dataset is trained with the best known config (no aux losses, staged).
+# Uses the best known config (all_new):
+#   no staged training, recognition_loss_weight=0,
+#   cross-speaker emotion context, future prediction head (w=0.1),
+#   joint transition head (w=0.1)
+#
 # Per-emotion F1 / accuracy / weighted-F1 saved to multi_dataset_results.csv
 #
 # Usage:
-#   bash run_all_datasets.sh [--device cuda] [--batch_size 8] [--skip_iemocap]
+#   bash run_all_datasets.sh [--device cuda] [--batch_size 8] [--llama_model MODEL]
 # =============================================================================
 set -euo pipefail
 
@@ -16,11 +20,13 @@ cd "$SCRIPT_DIR"
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEVICE="cuda"
 BATCH_SIZE=8
+LLAMA_MODEL="meta-llama/Llama-3.1-8B"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --device)     DEVICE="$2";     shift 2 ;;
-    --batch_size) BATCH_SIZE="$2"; shift 2 ;;
+    --device)      DEVICE="$2";      shift 2 ;;
+    --batch_size)  BATCH_SIZE="$2";  shift 2 ;;
+    --llama_model) LLAMA_MODEL="$2"; shift 2 ;;
     *) echo "[ERROR] Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -57,11 +63,19 @@ run_dataset() {
   header "$name"
 
   local exit_code=0
-  $PYTHON main.py --mode train \
-    --batch_size    "$BATCH_SIZE"  \
-    --device        "$DEVICE"      \
-    --output_dir    "$out_dir"     \
-    --staged_training              \
+  $PYTHON test_ablation_runner.py \
+    --name        "$key"          \
+    --output_dir  "$out_dir"      \
+    --batch_size  "$BATCH_SIZE"   \
+    --device      "$DEVICE"       \
+    --llama_model "$LLAMA_MODEL"  \
+    --no_staged                   \
+    --recognition_loss_weight 0.0 \
+    --use_cross_speaker_emo       \
+    --use_future_pred             \
+    --future_pred_weight 0.1      \
+    --use_joint_transition        \
+    --joint_transition_weight 0.1 \
     "$@" 2>&1 | tee "$log_file" || exit_code=$?
 
   if [[ $exit_code -ne 0 ]]; then
@@ -136,9 +150,17 @@ run_dataset "dailydialog" "DailyDialog" \
   --dialogue_id_col "Dialogue_ID"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. MELD  (direct HuggingFace — no preprocessing needed)
+# 5. MELD
 # ─────────────────────────────────────────────────────────────────────────────
-run_dataset "meld" "MELD (eusip/silicone meld_e)"
+MELD_DIR="./data/meld"
+ensure_csv "meld" "$MELD_DIR"
+
+run_dataset "meld" "MELD" \
+  --local_data      "$MELD_DIR"  \
+  --utterance_col   "Utterance"  \
+  --speaker_col     "Speaker"    \
+  --emotion_col     "Emotion"    \
+  --dialogue_id_col "Dialogue_ID"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Compile results CSV
