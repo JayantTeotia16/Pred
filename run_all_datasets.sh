@@ -150,17 +150,9 @@ run_dataset "dailydialog" "DailyDialog" \
   --dialogue_id_col "Dialogue_ID"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. MELD
+# 5. MELD  (loads from HuggingFace — no local preprocessing)
 # ─────────────────────────────────────────────────────────────────────────────
-MELD_DIR="./data/meld"
-ensure_csv "meld" "$MELD_DIR"
-
-run_dataset "meld" "MELD" \
-  --local_data      "$MELD_DIR"  \
-  --utterance_col   "Utterance"  \
-  --speaker_col     "Speaker"    \
-  --emotion_col     "Emotion"    \
-  --dialogue_id_col "Dialogue_ID"
+run_dataset "meld" "MELD (eusip/silicone meld_e)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Compile results CSV

@@ -88,7 +88,7 @@ def parse_args():
     p.add_argument("--llama_model", default="meta-llama/Llama-3.2-1B")
 
     # Data
-    p.add_argument("--local_data",       default="./data/iemocap")
+    p.add_argument("--local_data",       default=None)
     p.add_argument("--utterance_col",    default="Utterance")
     p.add_argument("--speaker_col",      default="Speaker")
     p.add_argument("--emotion_col",      default="Emotion")
@@ -149,13 +149,14 @@ def main():
     cfg.training.staged_training        = not args.no_staged
     cfg.training.recognition_loss_weight = args.recognition_loss_weight
 
-    cfg.data.hf_dataset_name     = None
-    cfg.data.local_data_dir      = args.local_data
-    cfg.data.emotion_int_to_name = None
-    cfg.data.utterance_col       = args.utterance_col
-    cfg.data.speaker_col         = args.speaker_col
-    cfg.data.emotion_col         = args.emotion_col
-    cfg.data.dialogue_id_col     = args.dialogue_id_col
+    if args.local_data:
+        cfg.data.hf_dataset_name     = None
+        cfg.data.local_data_dir      = args.local_data
+        cfg.data.emotion_int_to_name = None
+    cfg.data.utterance_col   = args.utterance_col
+    cfg.data.speaker_col     = args.speaker_col
+    cfg.data.emotion_col     = args.emotion_col
+    cfg.data.dialogue_id_col = args.dialogue_id_col
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
