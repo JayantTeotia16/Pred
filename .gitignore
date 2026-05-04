@@ -6,3 +6,4 @@ checkpoints_full_rel/
 checkpoints_baseline/
 ablation_checkpoints/
 analysis_outputs
+paper.tex

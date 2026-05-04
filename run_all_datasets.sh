@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_all_datasets.sh — Train and evaluate on MELD, DailyDialog, IEMOCAP
+# run_all_datasets.sh - Train and evaluate on MELD, DailyDialog, IEMOCAP,
+#                       EmoryNLP (MultiDialog already done separately)
 #
 # Uses the best known config (all_new):
 #   no staged training, recognition_loss_weight=0,
 #   cross-speaker emotion context, future prediction head (w=0.1),
 #   joint transition head (w=0.1)
-#
-# Per-emotion F1 / accuracy / weighted-F1 saved to multi_dataset_results.csv
 #
 # Usage:
 #   bash run_all_datasets.sh [--device cuda] [--batch_size 8] [--llama_model MODEL]
@@ -17,7 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
+# Defaults
 DEVICE="cuda"
 BATCH_SIZE=8
 LLAMA_MODEL="meta-llama/Llama-3.1-8B"
@@ -45,12 +44,12 @@ log()    { echo -e "${CYAN}[$(date '+%H:%M:%S')]${NC} $*"; }
 ok()     { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()   { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 header() {
-  echo -e "\n${BOLD}${CYAN}══════════════════════════════════════════${NC}"
+  echo -e "\n${BOLD}${CYAN}==========================================${NC}"
   echo -e "${BOLD}${CYAN}  $*${NC}"
-  echo -e "${BOLD}${CYAN}══════════════════════════════════════════${NC}\n"
+  echo -e "${BOLD}${CYAN}==========================================${NC}\n"
 }
 
-# ── Run one dataset ───────────────────────────────────────────────────────────
+# Run one dataset
 # Args: dataset_key  display_name  [extra python args ...]
 run_dataset() {
   local key="$1"
@@ -85,7 +84,7 @@ run_dataset() {
   ok "$name training done"
 }
 
-# ── Check / prep dataset ──────────────────────────────────────────────────────
+# Check / prep dataset
 ensure_csv() {
   local dataset="$1"
   local out_dir="$2"
@@ -97,22 +96,9 @@ ensure_csv() {
   $PYTHON prep_data.py --dataset "$dataset" --out_dir "$out_dir"
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. MultiDialog  (IVLLab/MultiDialog — public, 7 emotions, 151k utterances)
-# ─────────────────────────────────────────────────────────────────────────────
-MULTIDIALOG_DIR="./data/multidialog"
-ensure_csv "multidialog" "$MULTIDIALOG_DIR"
-
-run_dataset "multidialog" "MultiDialog" \
-  --local_data      "$MULTIDIALOG_DIR" \
-  --utterance_col   "Utterance"        \
-  --speaker_col     "Speaker"          \
-  --emotion_col     "Emotion"          \
-  --dialogue_id_col "Dialogue_ID"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. EmoryNLP  (GitHub — dispositional labels, best match for our task)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 1. EmoryNLP
+# -----------------------------------------------------------------------------
 EMORYNLP_DIR="./data/emorynlp"
 ensure_csv "emorynlp" "$EMORYNLP_DIR"
 
@@ -123,9 +109,9 @@ run_dataset "emorynlp" "EmoryNLP" \
   --emotion_col     "Emotion"       \
   --dialogue_id_col "Dialogue_ID"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. IEMOCAP  (Berzerker/IEMOCAP — txt files, no auth needed)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 2. IEMOCAP
+# -----------------------------------------------------------------------------
 IEMOCAP_DIR="./data/iemocap"
 ensure_csv "iemocap" "$IEMOCAP_DIR"
 
@@ -136,9 +122,9 @@ run_dataset "iemocap" "IEMOCAP" \
   --emotion_col     "Emotion"      \
   --dialogue_id_col "Dialogue_ID"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. DailyDialog  (via eusip/silicone dyda_e — avoids broken daily_dialog zip)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 3. DailyDialog
+# -----------------------------------------------------------------------------
 DAILYDIALOG_DIR="./data/dailydialog"
 ensure_csv "dailydialog" "$DAILYDIALOG_DIR"
 
@@ -149,15 +135,15 @@ run_dataset "dailydialog" "DailyDialog" \
   --emotion_col     "Emotion"          \
   --dialogue_id_col "Dialogue_ID"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. MELD  (loads from HuggingFace — no local preprocessing)
-# ─────────────────────────────────────────────────────────────────────────────
-run_dataset "meld" "MELD (eusip/silicone meld_e)"
+# -----------------------------------------------------------------------------
+# 4. MELD  (loads from HuggingFace)
+# -----------------------------------------------------------------------------
+run_dataset "meld" "MELD"
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Compile results CSV
-# ─────────────────────────────────────────────────────────────────────────────
-header "Compiling Results → $RESULTS_CSV"
+# -----------------------------------------------------------------------------
+header "Compiling Results"
 
 $PYTHON - "$CKPT_BASE" "$RESULTS_CSV" <<'PYEOF'
 import os, json, csv, sys
@@ -165,29 +151,36 @@ import os, json, csv, sys
 ckpt_base   = sys.argv[1]
 results_csv = sys.argv[2]
 
-DATASET_NAMES = {"emorynlp": "EmoryNLP", "iemocap": "IEMOCAP", "multidialog": "MultiDialog", "dailydialog": "DailyDialog", "meld": "MELD"}
+DATASET_NAMES = {
+    "multidialog": "MultiDialog",
+    "emorynlp":    "EmoryNLP",
+    "iemocap":     "IEMOCAP",
+    "dailydialog": "DailyDialog",
+    "meld":        "MELD",
+}
 
-summary_rows  = []   # one row per dataset (overall metrics)
-emotion_rows  = []   # one row per dataset × emotion
+summary_rows = []
+emotion_rows = []
 
 for key, display in DATASET_NAMES.items():
     metrics_path = os.path.join(ckpt_base, key, "test_metrics.json")
     if not os.path.isfile(metrics_path):
-        print(f"  [SKIP] No test_metrics.json for {display}")
+        print("  [SKIP] No test_metrics.json for " + display)
         continue
 
     with open(metrics_path) as f:
         m = json.load(f)
 
-    summary_rows.append({
+    row = {
         "dataset":        display,
         "accuracy":       round(m.get("accuracy",       0), 4),
         "weighted_f1":    round(m.get("weighted_f1",    0), 4),
         "recognition_f1": round(m.get("recognition_f1", 0) or 0, 4),
         "mean_surprise":  round(m.get("mean_surprise",  0), 4),
-        **{f"bucket_f1_{k}": round(v, 4)
-           for k, v in m.get("bucket_f1", {}).items()},
-    })
+    }
+    for k, v in m.get("bucket_f1", {}).items():
+        row["bucket_f1_" + k] = round(v, 4)
+    summary_rows.append(row)
 
     for emo, stats in m.get("per_emotion", {}).items():
         emotion_rows.append({
@@ -199,38 +192,40 @@ for key, display in DATASET_NAMES.items():
             "support":   int(stats.get("support",     0)),
         })
 
-# ── Summary table ──────────────────────────────────────────────────────────
 print("\n  Overall Metrics:")
 if summary_rows:
     cols = list(summary_rows[0].keys())
     w = max(len(c) for c in cols)
-    print("  " + "  ".join(f"{c:<{max(w,10)}}" for c in cols))
-    print("  " + "  ".join("-" * max(w,10) for c in cols))
+    w = max(w, 10)
+    print("  " + "  ".join(c.ljust(w) for c in cols))
+    print("  " + "  ".join("-" * w for c in cols))
     for r in summary_rows:
-        print("  " + "  ".join(f"{str(r[c]):<{max(w,10)}}" for c in cols))
+        print("  " + "  ".join(str(r[c]).ljust(w) for c in cols))
 
-# ── Per-emotion table ──────────────────────────────────────────────────────
 print("\n  Per-Emotion Metrics:")
 if emotion_rows:
-    print(f"  {'Dataset':<14} {'Emotion':<12} {'F1':>7} {'Prec':>7} {'Rec':>7} {'Support':>9}")
-    print(f"  {'-'*14} {'-'*12} {'-'*7} {'-'*7} {'-'*7} {'-'*9}")
+    print("  {:<14} {:<20} {:>7} {:>7} {:>7} {:>9}".format(
+        "Dataset", "Emotion", "F1", "Prec", "Rec", "Support"))
+    print("  " + "-" * 70)
     for r in emotion_rows:
-        print(f"  {r['dataset']:<14} {r['emotion']:<12} "
-              f"{r['f1']:>7.4f} {r['precision']:>7.4f} {r['recall']:>7.4f} {r['support']:>9}")
+        print("  {:<14} {:<20} {:>7.4f} {:>7.4f} {:>7.4f} {:>9}".format(
+            r["dataset"], r["emotion"],
+            r["f1"], r["precision"], r["recall"], r["support"]))
 
-# ── Save CSVs ──────────────────────────────────────────────────────────────
 if summary_rows:
     with open(results_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
-        writer.writeheader(); writer.writerows(summary_rows)
-    print(f"\n  Summary CSV → {results_csv}")
+        writer.writeheader()
+        writer.writerows(summary_rows)
+    print("\n  Summary CSV -> " + results_csv)
 
 emotion_csv = results_csv.replace(".csv", "_per_emotion.csv")
 if emotion_rows:
     with open(emotion_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["dataset","emotion","precision","recall","f1","support"])
-        writer.writeheader(); writer.writerows(emotion_rows)
-    print(f"  Per-emotion CSV → {emotion_csv}")
+        writer.writeheader()
+        writer.writerows(emotion_rows)
+    print("  Per-emotion CSV -> " + emotion_csv)
 PYEOF
 
 echo ""
