@@ -97,7 +97,12 @@ ensure_csv() {
 }
 
 # -----------------------------------------------------------------------------
-# 1. EmoryNLP
+# 1. MELD  (loads from HuggingFace)
+# -----------------------------------------------------------------------------
+run_dataset "meld" "MELD"
+
+# -----------------------------------------------------------------------------
+# 2. EmoryNLP
 # -----------------------------------------------------------------------------
 EMORYNLP_DIR="./data/emorynlp"
 ensure_csv "emorynlp" "$EMORYNLP_DIR"
@@ -107,19 +112,6 @@ run_dataset "emorynlp" "EmoryNLP" \
   --utterance_col   "Utterance"     \
   --speaker_col     "Speaker"       \
   --emotion_col     "Emotion"       \
-  --dialogue_id_col "Dialogue_ID"
-
-# -----------------------------------------------------------------------------
-# 2. IEMOCAP
-# -----------------------------------------------------------------------------
-IEMOCAP_DIR="./data/iemocap"
-ensure_csv "iemocap" "$IEMOCAP_DIR"
-
-run_dataset "iemocap" "IEMOCAP" \
-  --local_data      "$IEMOCAP_DIR" \
-  --utterance_col   "Utterance"    \
-  --speaker_col     "Speaker"      \
-  --emotion_col     "Emotion"      \
   --dialogue_id_col "Dialogue_ID"
 
 # -----------------------------------------------------------------------------
@@ -134,11 +126,6 @@ run_dataset "dailydialog" "DailyDialog" \
   --speaker_col     "Speaker"          \
   --emotion_col     "Emotion"          \
   --dialogue_id_col "Dialogue_ID"
-
-# -----------------------------------------------------------------------------
-# 4. MELD  (loads from HuggingFace)
-# -----------------------------------------------------------------------------
-run_dataset "meld" "MELD"
 
 # -----------------------------------------------------------------------------
 # Compile results CSV
