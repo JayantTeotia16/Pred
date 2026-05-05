@@ -109,6 +109,13 @@ def parse_args():
     p.add_argument("--use_joint_transition",    action="store_true")
     p.add_argument("--joint_transition_weight", type=float, default=0.1)
 
+    # Label module ablations (set to 1 to disable)
+    p.add_argument("--label_context_dim",      type=int, default=None)
+    p.add_argument("--emotion_label_embed_dim", type=int, default=None)
+
+    # LoRA ablation
+    p.add_argument("--no_lora", action="store_true")
+
     return p.parse_args()
 
 
@@ -142,6 +149,11 @@ def main():
     except Exception:
         print(f"  LLaMA hidden size: {cfg.model.llama_hidden_size} (from config)")
     cfg.model.llama_model_name = args.llama_model
+    cfg.model.use_lora = not args.no_lora
+    if args.label_context_dim is not None:
+        cfg.model.label_context_dim = args.label_context_dim
+    if args.emotion_label_embed_dim is not None:
+        cfg.model.emotion_label_embed_dim = args.emotion_label_embed_dim
 
     cfg.training.device                 = args.device
     cfg.training.batch_size             = args.batch_size
