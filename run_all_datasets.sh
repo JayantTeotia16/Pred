@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_all_datasets.sh - Train and evaluate on MELD, DailyDialog, IEMOCAP,
-#                       EmoryNLP (MultiDialog already done separately)
+# run_all_datasets.sh - Train and evaluate on all 5 datasets.
+#
+# Order: IEMOCAP, MELD, EmoryNLP, MultiDialog, DailyDialog
 #
 # Uses the best known config (all_new):
 #   no staged training, recognition_loss_weight=0,
@@ -19,7 +20,7 @@ cd "$SCRIPT_DIR"
 # Defaults
 DEVICE="cuda"
 BATCH_SIZE=8
-LLAMA_MODEL="meta-llama/Llama-3.1-8B"
+LLAMA_MODEL="meta-llama/Llama-3.2-1B-Instruct"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -97,12 +98,25 @@ ensure_csv() {
 }
 
 # -----------------------------------------------------------------------------
-# 1. MELD  (loads from HuggingFace)
+# 1. IEMOCAP
+# -----------------------------------------------------------------------------
+IEMOCAP_DIR="./data/iemocap"
+ensure_csv "iemocap" "$IEMOCAP_DIR"
+
+run_dataset "iemocap" "IEMOCAP" \
+  --local_data      "$IEMOCAP_DIR" \
+  --utterance_col   "Utterance"    \
+  --speaker_col     "Speaker"      \
+  --emotion_col     "Emotion"      \
+  --dialogue_id_col "Dialogue_ID"
+
+# -----------------------------------------------------------------------------
+# 2. MELD  (loads from HuggingFace)
 # -----------------------------------------------------------------------------
 run_dataset "meld" "MELD"
 
 # -----------------------------------------------------------------------------
-# 2. EmoryNLP
+# 3. EmoryNLP
 # -----------------------------------------------------------------------------
 EMORYNLP_DIR="./data/emorynlp"
 ensure_csv "emorynlp" "$EMORYNLP_DIR"
@@ -115,7 +129,20 @@ run_dataset "emorynlp" "EmoryNLP" \
   --dialogue_id_col "Dialogue_ID"
 
 # -----------------------------------------------------------------------------
-# 3. DailyDialog
+# 4. MultiDialog
+# -----------------------------------------------------------------------------
+MULTIDIALOG_DIR="./data/multidialog"
+ensure_csv "multidialog" "$MULTIDIALOG_DIR"
+
+run_dataset "multidialog" "MultiDialog" \
+  --local_data      "$MULTIDIALOG_DIR" \
+  --utterance_col   "Utterance"        \
+  --speaker_col     "Speaker"          \
+  --emotion_col     "Emotion"          \
+  --dialogue_id_col "Dialogue_ID"
+
+# -----------------------------------------------------------------------------
+# 5. DailyDialog
 # -----------------------------------------------------------------------------
 DAILYDIALOG_DIR="./data/dailydialog"
 ensure_csv "dailydialog" "$DAILYDIALOG_DIR"

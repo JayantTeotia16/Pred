@@ -27,6 +27,8 @@
 # =============================================================================
 set -euo pipefail
 
+export CUDA_VISIBLE_DEVICES=6
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
